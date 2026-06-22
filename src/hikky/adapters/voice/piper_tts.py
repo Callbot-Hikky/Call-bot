@@ -4,12 +4,14 @@ Installation : `pip install -e ".[voice]"` puis télécharger une voix Piper
 française (par exemple `fr_FR-siwis-medium.onnx` depuis le hub Piper).
 
 Piper synthétise en PCM 16-bit signé à 22050 Hz par défaut (selon la voix).
-On livre les chunks au fur et à mesure qu'ils sortent du modèle, pour le
-streaming.
+Le streaming réel chunk-par-chunk demandera l'intégration Pipecat (plan E) ;
+pour l'instant on agrège dans un thread (asyncio.to_thread) pour ne pas
+bloquer l'event loop, puis on livre les chunks au consommateur.
 
 Lazy import — la suite de tests tourne sans la lib installée.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -30,8 +32,11 @@ class PiperTTSAdapter(SpeechSynthesisPort):
 
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         voice = self._load_voice()
-        # Piper expose `synthesize_stream_raw(text)` qui yield des bytes PCM.
-        chunks = list(voice.synthesize_stream_raw(text))
+
+        def _collect() -> list[bytes]:
+            return list(voice.synthesize_stream_raw(text))
+
+        chunks = await asyncio.to_thread(_collect)
 
         async def _stream() -> AsyncIterator[bytes]:
             for chunk in chunks:

@@ -53,6 +53,34 @@ async def test_voice_loaded_once_across_calls(fake_piper_module):
     assert piper_voice_cls.load.call_count == 1
 
 
+async def test_synthesize_does_not_block_event_loop(fake_piper_module):
+    import asyncio
+    import time
+
+    _, voice = fake_piper_module
+
+    def _slow(_text):
+        time.sleep(0.1)
+        return iter([b"\x00\x01"])
+
+    voice.synthesize_stream_raw.side_effect = _slow
+
+    adapter = PiperTTSAdapter(model_path="/v.onnx")
+    progress = []
+
+    async def tick():
+        for _ in range(5):
+            await asyncio.sleep(0.02)
+            progress.append("tick")
+
+    async def synth_once():
+        stream = await adapter.synthesize("hello")
+        [c async for c in stream]
+
+    await asyncio.gather(tick(), synth_once())
+    assert len(progress) >= 3
+
+
 async def test_synthesize_yields_nothing_when_piper_returns_empty(fake_piper_module):
     _, voice = fake_piper_module
     voice.synthesize_stream_raw.return_value = iter([])
