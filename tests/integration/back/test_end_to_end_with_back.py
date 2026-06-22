@@ -50,6 +50,11 @@ async def test_full_reservation_flow_hits_back_endpoints(
         url=f"{base_url}/calls/c-1/start", method="POST", status_code=204
     )
     httpx_mock.add_response(
+        url=f"{base_url}/restaurants/r-1/availability",
+        method="POST",
+        json={"available": True},
+    )
+    httpx_mock.add_response(
         url=f"{base_url}/restaurants/r-1/reservations",
         method="POST",
         json={"reservation_id": "res-abc"},
@@ -103,6 +108,7 @@ async def test_full_reservation_flow_hits_back_endpoints(
     assert paths == [
         "/restaurants/by-phone/+33100000001",
         "/calls/c-1/start",
+        "/restaurants/r-1/availability",
         "/restaurants/r-1/reservations",
         "/reservations/res-abc/confirmation",
         "/calls/c-1/end",
