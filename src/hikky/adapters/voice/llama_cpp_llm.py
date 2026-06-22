@@ -16,6 +16,7 @@ import asyncio
 from typing import Any
 
 from hikky.exceptions import LLMOverloaded
+from hikky.observability.latency import measure_latency
 from hikky.ports.language_model import LanguageModelPort
 
 DEFAULT_MAX_TOKENS = 256
@@ -54,12 +55,13 @@ class LlamaCppLLMAdapter(LanguageModelPort):
     async def complete(self, messages: list[dict[str, str]]) -> str:
         model = self._load_model()
         try:
-            response = await asyncio.to_thread(
-                model.create_chat_completion,
-                messages=messages,
-                max_tokens=self._max_tokens,
-                temperature=self._temperature,
-            )
+            async with measure_latency("llm", message_count=len(messages)):
+                response = await asyncio.to_thread(
+                    model.create_chat_completion,
+                    messages=messages,
+                    max_tokens=self._max_tokens,
+                    temperature=self._temperature,
+                )
         except (RuntimeError, ValueError, OSError) as exc:
             raise LLMOverloaded(f"llama-cpp failed: {exc}") from exc
 

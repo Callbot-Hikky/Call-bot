@@ -65,6 +65,7 @@ class AppDependencies:
     session_factory: Callable[[str, object], CallSession]
     # session_factory(call_sid, restaurant_context) → CallSession câblée
 
+    slot_extractor: object | None = None  # SlotExtractor concret (LLM-driven en prod)
     tts_sample_rate: int = 22050
 
 
@@ -167,6 +168,7 @@ async def _run_call(
             stt_adapter=deps.stt_adapter,
             tts_adapter=deps.tts_adapter,
             session=session,
+            slot_extractor=deps.slot_extractor,  # type: ignore[arg-type]
             tts_sample_rate=deps.tts_sample_rate,
         )
 
@@ -183,7 +185,32 @@ async def _run_call(
             logger.exception("Failed to end session in cleanup")
 
 
-# Instance par défaut, utilisable par `uvicorn hikky.app.main:app`.
-# En production, on remplacera par une factory qui construit `AppDependencies`
-# avec les vrais adapters chargés depuis la config.
-app = create_app()
+def _build_default_dependencies() -> AppDependencies | None:
+    """Tente de construire les dépendances réelles depuis l'environnement.
+    Si une variable est absente, log un avertissement et renvoie None —
+    l'app démarre quand même (pour `/health`) mais refuse les appels."""
+    try:
+        from hikky.app.config import MissingConfig, load_from_env
+        from hikky.app.dependencies import build_app_dependencies
+    except ImportError:
+        logger.warning("Dependency assembly modules unavailable")
+        return None
+
+    try:
+        config = load_from_env()
+    except MissingConfig as exc:
+        logger.warning(
+            "Missing env var %s — app will refuse Twilio connections "
+            "(set %s and restart to enable)",
+            exc,
+            exc,
+        )
+        return None
+
+    return build_app_dependencies(config)
+
+
+# Instance par défaut, utilisable par `uvicorn hikky.app.main:app`. Si les
+# variables d'environnement requises sont présentes, les vraies dépendances
+# sont câblées ; sinon l'app accepte `/health` mais refuse `/twilio/...`.
+app = create_app(deps=_build_default_dependencies())
