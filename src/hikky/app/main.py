@@ -12,12 +12,15 @@ Côté Twilio, configurer le numéro pour qu'au décrochage il <Connect><Stream>
 vers `wss://<votre-host-ngrok>/twilio/{{CallSid}}`. Le `CallSid` Twilio
 sert d'identifiant d'appel côté Hikky.
 
-Pour l'instant, l'app fait juste de l'écho : tout chunk audio reçu est
-renvoyé à l'identique. C'est le walking skeleton — la pipeline réelle
-(STT, dialogue, TTS) viendra dans les plans D et E.
+Comportement actuel (walking skeleton) :
+- À la réception de l'event `start`, le serveur **joue un audio d'accueil canné**
+  (silence pour l'instant — le vrai TTS arrive en plan D).
+- Chaque chunk d'audio `inbound` est renvoyé tel quel à l'appelant (écho).
+- Les media `outbound` (réflexion éventuelle) sont ignorés pour éviter toute boucle.
 """
 
 import json
+import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -29,8 +32,17 @@ from hikky.adapters.telephony.twilio_protocol import (
     decode_inbound,
 )
 
+logger = logging.getLogger("hikky.app")
 
-def create_app(telephony: TwilioMediaStreamsAdapter | None = None) -> FastAPI:
+# Greeting audio canné — 320 octets μ-law 8 kHz = ~40 ms de silence.
+# Sera remplacé par le vrai TTS en plan D.
+GREETING_AUDIO: bytes = b"\xff" * 320
+
+
+def create_app(
+    telephony: TwilioMediaStreamsAdapter | None = None,
+    greeting_audio: bytes = GREETING_AUDIO,
+) -> FastAPI:
     app = FastAPI(title="Hikky IA")
     telephony_adapter = telephony or TwilioMediaStreamsAdapter()
     app.state.telephony = telephony_adapter
@@ -52,11 +64,23 @@ def create_app(telephony: TwilioMediaStreamsAdapter | None = None) -> FastAPI:
                 if isinstance(frame, StartFrame):
                     telephony_adapter.bind_call(call_sid, websocket, frame.stream_sid)
                     bound = True
+                    await telephony_adapter.send_audio(call_sid, greeting_audio)
 
                 elif isinstance(frame, MediaFrame):
-                    # Walking skeleton : on renvoie l'audio tel quel
-                    if bound:
-                        await telephony_adapter.send_audio(call_sid, frame.audio)
+                    if not bound:
+                        logger.warning(
+                            "Dropping media frame received before start (call_sid=%s)",
+                            call_sid,
+                        )
+                        continue
+                    if frame.track != "inbound":
+                        logger.debug(
+                            "Ignoring media on track=%s (call_sid=%s)",
+                            frame.track,
+                            call_sid,
+                        )
+                        continue
+                    await telephony_adapter.send_audio(call_sid, frame.audio)
 
                 elif isinstance(frame, StopFrame):
                     break
