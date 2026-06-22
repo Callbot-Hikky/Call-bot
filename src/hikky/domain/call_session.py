@@ -20,6 +20,8 @@ class _SessionState:
     consecutive_no_progress_turns: int = 0
     started_at: datetime | None = None
     ended: bool = False
+    last_availability_check: bool | None = None
+    last_within_opening_hours: bool | None = None
 
 
 class CallSession:
@@ -77,6 +79,14 @@ class CallSession:
             group_size=group_size,
         )
 
+    @property
+    def last_availability_check(self) -> bool | None:
+        return self._state.last_availability_check
+
+    @property
+    def last_within_opening_hours(self) -> bool | None:
+        return self._state.last_within_opening_hours
+
     async def finalize_if_complete(self, customer_phone: str | None) -> CallOutcome | None:
         intent = self._state.intent
         if not intent.is_complete():
@@ -84,6 +94,21 @@ class CallSession:
         assert intent.date_time is not None
         assert intent.party_size is not None
         assert intent.customer_name is not None
+
+        within_hours = self.context.is_open_at(intent.date_time)
+        self._state.last_within_opening_hours = within_hours
+        if not within_hours:
+            return None
+
+        available = await self._reservation.check_availability(
+            restaurant_id=self.context.id,
+            date_time=intent.date_time,
+            party_size=intent.party_size,
+        )
+        self._state.last_availability_check = available
+        if not available:
+            return None
+
         reservation_id = await self._reservation.create(
             restaurant_id=self.context.id,
             date_time=intent.date_time,

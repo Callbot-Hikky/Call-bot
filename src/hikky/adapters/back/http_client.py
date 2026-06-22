@@ -81,3 +81,9 @@ class BackHttpClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def __aenter__(self) -> "BackHttpClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
