@@ -99,7 +99,7 @@ class DialogueProcessor(FrameProcessor):
             return
 
         async with measure_latency("dialogue_turn"):
-            slot_updates = self._slot_extractor.extract(user_text)
+            slot_updates = await self._slot_extractor.extract(user_text)
             result = await self._session.process_user_turn(user_text, slot_updates)
 
         fallback = self._session.check_fallback(
@@ -141,12 +141,12 @@ class DialogueProcessor(FrameProcessor):
 
 
 class SlotExtractor:
-    """Interface : à implémenter par une vraie extraction LLM/NER plus tard."""
+    """Interface async : extrait des slots structurés d'un tour de parole."""
 
-    def extract(self, user_text: str) -> dict[str, Any]:  # pragma: no cover - interface
+    async def extract(self, user_text: str) -> dict[str, Any]:  # pragma: no cover
         raise NotImplementedError
 
 
 class _NoOpSlotExtractor(SlotExtractor):
-    def extract(self, user_text: str) -> dict[str, Any]:
+    async def extract(self, user_text: str) -> dict[str, Any]:
         return {}
