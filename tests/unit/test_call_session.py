@@ -80,3 +80,42 @@ async def test_full_reservation_flow_ends_with_created_outcome():
     assert notif.sent
     assert log.entries[-1][0] == "end"
     assert log.entries[-1][2] == CallOutcome.RESERVATION_CREATED
+
+
+async def test_finalize_refuses_when_slot_unavailable():
+    session, reservation, _, notif = await _make_session(
+        llm_replies=["Quand ?", "Combien ?", "Nom ?", "..."]
+    )
+    reservation.set_availability("r-1", available=False)
+
+    await session.process_user_turn(
+        "Demain 20h", slot_updates={"date_time": datetime(2026, 7, 2, 20)}
+    )
+    await session.process_user_turn("4", slot_updates={"party_size": 4})
+    await session.process_user_turn("Dupont", slot_updates={"customer_name": "Dupont"})
+
+    outcome = await session.finalize_if_complete(customer_phone="+33600000000")
+    assert outcome is None
+    assert reservation.reservations == {}
+    assert notif.sent == []
+    assert session.last_availability_check is False
+
+
+async def test_finalize_refuses_when_date_outside_opening_hours():
+    session, reservation, _, notif = await _make_session(
+        llm_replies=["Quand ?", "Combien ?", "Nom ?", "..."]
+    )
+    reservation.set_availability("r-1", available=True)
+
+    # Restaurant ouvert 19h-23h ; on tente une réservation à 12h
+    await session.process_user_turn(
+        "Demain midi", slot_updates={"date_time": datetime(2026, 7, 2, 12)}
+    )
+    await session.process_user_turn("4", slot_updates={"party_size": 4})
+    await session.process_user_turn("Dupont", slot_updates={"customer_name": "Dupont"})
+
+    outcome = await session.finalize_if_complete(customer_phone="+33600000000")
+    assert outcome is None
+    assert reservation.reservations == {}
+    assert notif.sent == []
+    assert session.last_within_opening_hours is False
