@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from hikky.domain.outcomes import CallOutcome
 from hikky.exceptions import UnknownRestaurant
 from hikky.observability.logging import (
     clear_call_context,
@@ -159,17 +160,27 @@ async def _run_call(
     )
 
     session = deps.session_factory(call_sid, ctx)
-    build = build_pipeline_task(
-        transport_input=transport.input(),
-        transport_output=transport.output(),
-        stt_adapter=deps.stt_adapter,
-        tts_adapter=deps.tts_adapter,
-        session=session,
-        tts_sample_rate=deps.tts_sample_rate,
-    )
+    try:
+        build = build_pipeline_task(
+            transport_input=transport.input(),
+            transport_output=transport.output(),
+            stt_adapter=deps.stt_adapter,
+            tts_adapter=deps.tts_adapter,
+            session=session,
+            tts_sample_rate=deps.tts_sample_rate,
+        )
 
-    runner = PipelineRunner()
-    await runner.run(build.task)
+        runner = PipelineRunner()
+        await runner.run(build.task)
+    finally:
+        # Filet de sécurité : si la Pipeline a planté avant que le
+        # DialogueProcessor n'ait pu fermer la session, on s'assure que
+        # l'appel est journalisé comme `technical_error`. `end_with` est
+        # idempotent côté CallSession — no-op si déjà terminé.
+        try:
+            await session.end_with(CallOutcome.TECHNICAL_ERROR)
+        except Exception:  # noqa: BLE001 — meilleur effort, on quitte
+            logger.exception("Failed to end session in cleanup")
 
 
 # Instance par défaut, utilisable par `uvicorn hikky.app.main:app`.
