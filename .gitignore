@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Documents générés par Claude — ne jamais committer
+docs/superpowers/
