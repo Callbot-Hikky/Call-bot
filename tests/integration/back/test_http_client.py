@@ -67,3 +67,12 @@ async def test_post_returns_empty_dict_on_204(
     httpx_mock.add_response(url=f"{base_url}/noop", status_code=204)
     result = await back_client.post("/noop")
     assert result == {}
+
+
+async def test_client_works_as_async_context_manager(
+    httpx_mock: HTTPXMock, base_url: str
+):
+    httpx_mock.add_response(url=f"{base_url}/ping", json={"ok": True})
+    async with BackHttpClient(base_url=base_url, api_key="k") as client:
+        result = await client.get("/ping")
+    assert result == {"ok": True}
