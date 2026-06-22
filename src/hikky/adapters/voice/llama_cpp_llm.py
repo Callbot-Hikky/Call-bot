@@ -6,8 +6,13 @@ llama-cpp-python avec `CMAKE_ARGS="-DGGML_CUDA=on"` pour utiliser les
 couches GPU via `n_gpu_layers`.
 
 Lazy import — la suite de tests tourne sans la lib installée.
+
+L'inférence llama-cpp est synchrone et CPU/GPU-bound ; on l'enveloppe
+dans `asyncio.to_thread` pour ne pas bloquer l'event loop pendant que
+le modèle génère.
 """
 
+import asyncio
 from typing import Any
 
 from hikky.exceptions import LLMOverloaded
@@ -49,12 +54,13 @@ class LlamaCppLLMAdapter(LanguageModelPort):
     async def complete(self, messages: list[dict[str, str]]) -> str:
         model = self._load_model()
         try:
-            response = model.create_chat_completion(
+            response = await asyncio.to_thread(
+                model.create_chat_completion,
                 messages=messages,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (RuntimeError, ValueError, OSError) as exc:
             raise LLMOverloaded(f"llama-cpp failed: {exc}") from exc
 
         try:

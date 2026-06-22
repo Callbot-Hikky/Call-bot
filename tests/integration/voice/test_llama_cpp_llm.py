@@ -53,6 +53,43 @@ async def test_complete_raises_llm_overloaded_on_library_exception(fake_llama_mo
         await adapter.complete([{"role": "user", "content": "x"}])
 
 
+async def test_complete_lets_keyboard_interrupt_propagate(fake_llama_module):
+    """L'adapter capture les erreurs de la librairie mais doit laisser
+    passer les exceptions système (KeyboardInterrupt, SystemExit)."""
+    _, instance = fake_llama_module
+    instance.create_chat_completion.side_effect = KeyboardInterrupt()
+    adapter = LlamaCppLLMAdapter(model_path="/m.gguf")
+    with pytest.raises(KeyboardInterrupt):
+        await adapter.complete([{"role": "user", "content": "x"}])
+
+
+async def test_complete_does_not_block_event_loop(fake_llama_module):
+    import asyncio
+    import time
+
+    _, instance = fake_llama_module
+
+    def _slow(*_a, **_kw):
+        time.sleep(0.1)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    instance.create_chat_completion.side_effect = _slow
+
+    adapter = LlamaCppLLMAdapter(model_path="/m.gguf")
+    progress = []
+
+    async def tick():
+        for _ in range(5):
+            await asyncio.sleep(0.02)
+            progress.append("tick")
+
+    async def complete_once():
+        await adapter.complete([{"role": "user", "content": "x"}])
+
+    await asyncio.gather(tick(), complete_once())
+    assert len(progress) >= 3
+
+
 async def test_complete_raises_llm_overloaded_on_malformed_response(fake_llama_module):
     _, instance = fake_llama_module
     instance.create_chat_completion.return_value = {"unexpected": "shape"}
