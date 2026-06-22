@@ -87,6 +87,17 @@ class CallSession:
     def last_within_opening_hours(self) -> bool | None:
         return self._state.last_within_opening_hours
 
+    async def request_callback(
+        self, *, customer_phone: str, preferred_slot: str | None, note: str
+    ) -> str:
+        """Crée une demande de rappel via le ReservationPort. Renvoie l'id."""
+        return await self._reservation.create_callback_request(
+            restaurant_id=self.context.id,
+            customer_phone=customer_phone,
+            preferred_slot=preferred_slot,
+            note=note,
+        )
+
     async def finalize_if_complete(self, customer_phone: str | None) -> CallOutcome | None:
         intent = self._state.intent
         if not intent.is_complete():
