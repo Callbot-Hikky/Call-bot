@@ -17,6 +17,11 @@ dev = [
     "pytest-httpx>=0.30",
     "ruff>=0.5",
 ]
+voice = [
+    "faster-whisper>=1.0",
+    "llama-cpp-python>=0.2.79",
+    "piper-tts>=1.2",
+]
 
 [build-system]
 requires = ["hatchling"]
