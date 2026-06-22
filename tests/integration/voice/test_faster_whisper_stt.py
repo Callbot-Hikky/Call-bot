@@ -4,6 +4,7 @@ On mocke l'import via `sys.modules['faster_whisper']` ; ça permet de valider
 le câblage de l'adapter sans dépendance lourde.
 """
 
+import asyncio
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hikky.adapters.voice.faster_whisper_stt import FasterWhisperSTTAdapter
+from hikky.exceptions import STTTimeout
 
 
 @pytest.fixture
@@ -28,12 +30,23 @@ def fake_whisper_module(monkeypatch):
     return whisper_model_cls, model_instance
 
 
+@pytest.fixture
+def passthrough_audio_conversion(monkeypatch):
+    """Évite la dépendance à numpy dans les tests : la conversion devient
+    une identité (les bytes sont passés directement à `model.transcribe`)."""
+    monkeypatch.setattr(
+        FasterWhisperSTTAdapter, "_to_whisper_audio", lambda self, b: b
+    )
+
+
 async def _audio(chunks: list[bytes]):
     for c in chunks:
         yield c
 
 
-async def test_transcribe_loads_model_with_constructor_args(fake_whisper_module):
+async def test_transcribe_loads_model_with_constructor_args(
+    fake_whisper_module, passthrough_audio_conversion
+):
     whisper_model_cls, model_instance = fake_whisper_module
     adapter = FasterWhisperSTTAdapter(
         model_name="distil-large-v3", device="cuda", compute_type="int8"
@@ -46,7 +59,9 @@ async def test_transcribe_loads_model_with_constructor_args(fake_whisper_module)
     )
 
 
-async def test_transcribe_passes_audio_buffer_and_french_language(fake_whisper_module):
+async def test_transcribe_passes_audio_buffer_and_french_language(
+    fake_whisper_module, passthrough_audio_conversion
+):
     _, model_instance = fake_whisper_module
     adapter = FasterWhisperSTTAdapter()
     stream = await adapter.transcribe(_audio([b"\x10\x20", b"\x30\x40"]))
@@ -56,14 +71,18 @@ async def test_transcribe_passes_audio_buffer_and_french_language(fake_whisper_m
     assert call.kwargs["language"] == "fr"
 
 
-async def test_transcribe_yields_segment_texts_in_order(fake_whisper_module):
+async def test_transcribe_yields_segment_texts_in_order(
+    fake_whisper_module, passthrough_audio_conversion
+):
     adapter = FasterWhisperSTTAdapter()
     stream = await adapter.transcribe(_audio([b"\x00"]))
     texts = [text async for text in stream]
     assert texts == ["bonjour ", "je voudrais réserver"]
 
 
-async def test_model_is_loaded_once_across_calls(fake_whisper_module):
+async def test_model_is_loaded_once_across_calls(
+    fake_whisper_module, passthrough_audio_conversion
+):
     whisper_model_cls, _ = fake_whisper_module
     adapter = FasterWhisperSTTAdapter()
     stream1 = await adapter.transcribe(_audio([b"\x00"]))
@@ -71,3 +90,56 @@ async def test_model_is_loaded_once_across_calls(fake_whisper_module):
     stream2 = await adapter.transcribe(_audio([b"\x00"]))
     [x async for x in stream2]
     assert whisper_model_cls.call_count == 1
+
+
+async def test_transcribe_raises_stt_timeout_when_model_too_slow(
+    fake_whisper_module, passthrough_audio_conversion
+):
+    import time
+
+    _, model_instance = fake_whisper_module
+
+    def _slow_transcribe(*_args, **_kwargs):
+        time.sleep(0.5)
+        return ([], SimpleNamespace(language="fr"))
+
+    model_instance.transcribe.side_effect = _slow_transcribe
+
+    adapter = FasterWhisperSTTAdapter(timeout_seconds=0.1)
+    with pytest.raises(STTTimeout):
+        stream = await adapter.transcribe(_audio([b"\x00"]))
+        [text async for text in stream]
+
+
+async def test_transcribe_does_not_block_event_loop(
+    fake_whisper_module, passthrough_audio_conversion
+):
+    """Le modèle Whisper est synchrone — on doit l'invoquer dans un thread
+    pour ne pas bloquer l'event loop. Concrètement : pendant qu'on
+    transcribe, une autre coroutine doit pouvoir avancer."""
+    import time
+
+    _, model_instance = fake_whisper_module
+
+    def _blocking_transcribe(*_args, **_kwargs):
+        time.sleep(0.1)
+        return ([SimpleNamespace(text="ok")], SimpleNamespace(language="fr"))
+
+    model_instance.transcribe.side_effect = _blocking_transcribe
+
+    adapter = FasterWhisperSTTAdapter()
+    progress = []
+
+    async def tick():
+        for _ in range(5):
+            await asyncio.sleep(0.02)
+            progress.append("tick")
+
+    async def transcribe_one():
+        stream = await adapter.transcribe(_audio([b"\x00"]))
+        [x async for x in stream]
+
+    await asyncio.gather(tick(), transcribe_one())
+    # Si transcribe bloquait l'event loop, `tick` ne serait jamais appelé
+    # plus de 1 fois. Avec to_thread, il doit avancer en parallèle.
+    assert len(progress) >= 3
