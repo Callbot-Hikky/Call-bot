@@ -98,8 +98,9 @@ class DialogueProcessor(FrameProcessor):
         if self._closed:
             return
 
-        async with measure_latency("dialogue_turn"):
+        async with measure_latency("slot_extraction"):
             slot_updates = await self._slot_extractor.extract(user_text)
+        async with measure_latency("dialogue_engine"):
             result = await self._session.process_user_turn(user_text, slot_updates)
 
         fallback = self._session.check_fallback(
