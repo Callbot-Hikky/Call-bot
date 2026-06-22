@@ -83,7 +83,7 @@ class _FakeSlotExtractor(SlotExtractor):
     def __init__(self, by_text: dict[str, dict[str, Any]]) -> None:
         self._by_text = by_text
 
-    def extract(self, user_text: str) -> dict[str, Any]:
+    async def extract(self, user_text: str) -> dict[str, Any]:
         return self._by_text.get(user_text, {})
 
 
