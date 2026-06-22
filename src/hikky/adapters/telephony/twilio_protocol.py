@@ -33,6 +33,7 @@ class StartFrame:
 class MediaFrame:
     stream_sid: str
     audio: bytes  # μ-law 8 kHz mono
+    track: str = "inbound"  # "inbound" = voix du client, "outbound" = audio reflété
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +58,11 @@ def decode_inbound(payload: dict) -> InboundFrame:
     if event == "media":
         media = payload.get("media", {})
         audio = base64.b64decode(media.get("payload", ""))
-        return MediaFrame(stream_sid=payload.get("streamSid", ""), audio=audio)
+        return MediaFrame(
+            stream_sid=payload.get("streamSid", ""),
+            audio=audio,
+            track=media.get("track", "inbound"),
+        )
     if event == "stop":
         return StopFrame(stream_sid=payload.get("streamSid", ""))
     raise ValueError(f"Unknown Twilio Media Streams event: {event!r}")
