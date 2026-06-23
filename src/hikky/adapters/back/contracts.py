@@ -97,3 +97,31 @@ class CallStartRequest(BaseModel):
 class CallEndRequest(BaseModel):
     outcome: CallOutcome
     duration_seconds: float
+
+
+# ----- Idempotence -----
+
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+
+
+def build_reservation_idempotency_key(
+    *,
+    call_id: str,
+    restaurant_id: str,
+    date_time: datetime,
+    party_size: int,
+) -> str:
+    """Clé d'idempotence pour POST /restaurants/{rid}/reservations.
+
+    Le Back DOIT renvoyer la même `reservation_id` pour des appels
+    successifs avec la même clé pendant une fenêtre raisonnable
+    (≥30 min recommandé). Sans cette clé, un retry réseau après commit
+    serveur créerait une seconde réservation — table perdue, client
+    mécontent.
+
+    La clé combine `call_id` (unique par appel Twilio) et le « slot »
+    (restaurant + créneau + couverts). Le nom du client n'y est PAS
+    inclus : si l'utilisateur corrige son nom en cours d'appel, on
+    veut la même résa.
+    """
+    return f"{call_id}:{restaurant_id}:{date_time.isoformat()}:{party_size}"
