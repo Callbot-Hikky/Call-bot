@@ -95,3 +95,63 @@ async def test_back_unavailable_on_persistent_5xx(
     adapter = BackHttpReservationAdapter(back_client)
     with pytest.raises(BackUnavailable):
         await adapter.check_availability("r-1", datetime(2026, 7, 1, 20), 4)
+
+
+async def test_create_sends_idempotency_key_when_call_context_set(
+    httpx_mock: HTTPXMock, back_client: BackHttpClient, base_url: str
+):
+    from hikky.adapters.back.contracts import build_reservation_idempotency_key
+    from hikky.observability.logging import clear_call_context, set_call_context
+
+    httpx_mock.add_response(
+        url=f"{base_url}/restaurants/r-1/reservations",
+        method="POST",
+        json={"reservation_id": "res-1"},
+    )
+    adapter = BackHttpReservationAdapter(back_client)
+    set_call_context(call_id="call-42", restaurant_id="r-1")
+    try:
+        await adapter.create(
+            "r-1", datetime(2026, 7, 1, 20), 4, "Dupont", "+33600000000"
+        )
+    finally:
+        clear_call_context()
+
+    req = httpx_mock.get_requests()[0]
+    expected = build_reservation_idempotency_key(
+        call_id="call-42",
+        restaurant_id="r-1",
+        date_time=datetime(2026, 7, 1, 20),
+        party_size=4,
+    )
+    assert req.headers["Idempotency-Key"] == expected
+
+
+async def test_create_omits_idempotency_key_when_no_call_context(
+    httpx_mock: HTTPXMock, back_client: BackHttpClient, base_url: str
+):
+    from hikky.observability.logging import clear_call_context
+
+    clear_call_context()  # défensif au cas où un test précédent ait fuité
+    httpx_mock.add_response(
+        url=f"{base_url}/restaurants/r-1/reservations",
+        method="POST",
+        json={"reservation_id": "res-1"},
+    )
+    adapter = BackHttpReservationAdapter(back_client)
+    await adapter.create("r-1", datetime(2026, 7, 1, 20), 4, "Dupont", None)
+    req = httpx_mock.get_requests()[0]
+    assert "Idempotency-Key" not in req.headers
+
+
+async def test_idempotency_key_format_is_call_id_plus_slot():
+    """Test du contrat de la clé — doit être documenté et stable côté Back."""
+    from hikky.adapters.back.contracts import build_reservation_idempotency_key
+
+    key = build_reservation_idempotency_key(
+        call_id="CA123",
+        restaurant_id="r-9",
+        date_time=datetime(2026, 7, 2, 20, 30),
+        party_size=4,
+    )
+    assert key == "CA123:r-9:2026-07-02T20:30:00:4"

@@ -76,3 +76,13 @@ async def test_client_works_as_async_context_manager(
     async with BackHttpClient(base_url=base_url, api_key="k") as client:
         result = await client.get("/ping")
     assert result == {"ok": True}
+
+
+async def test_post_merges_custom_headers_with_auth(
+    httpx_mock: HTTPXMock, back_client: BackHttpClient, base_url: str
+):
+    httpx_mock.add_response(url=f"{base_url}/x", json={})
+    await back_client.post("/x", headers={"X-Custom": "foo"})
+    req = httpx_mock.get_requests()[0]
+    assert req.headers["X-Custom"] == "foo"
+    assert req.headers["Authorization"] == "Bearer test-key"
