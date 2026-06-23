@@ -31,6 +31,7 @@ from pipecat.frames.frames import (
     Frame,
     StartFrame,
     TranscriptionFrame,
+    TTSAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -208,10 +209,15 @@ async def test_pipeline_runs_end_to_end_with_real_dialogue_processor():
     # 5. L'EndFrame atteint le sink → la chaîne complète a terminé proprement.
     assert "EndFrame" in captured_types
 
-    # LIMITE CONNUE — les TTSAudioRawFrame produites par notre service ne
-    # sont pas propagées jusqu'au sink à cause d'un mismatch avec le système
-    # d'audio context interne de TTSService (warning Pipecat « unable to
-    # append audio to context »). C'est une vraie dette que ce test révèle
-    # et qui devra être corrigée avant le premier vrai appel Twilio sur GPU.
-    # Pour l'instant, on documente la dette plutôt que de mentir avec un
-    # `assert any(isinstance(f, TTSAudioRawFrame) ...)`.
+    # 6. Au moins une TTSAudioRawFrame atteint le sink → l'audio synthétisé
+    #    traverse réellement la chaîne. Ça prouve que notre DialogueProcessor
+    #    encadre bien les TextFrame par LLMFullResponseStartFrame/EndFrame,
+    #    ce qui permet à TTSService d'initialiser son audio_context et de
+    #    router les frames audio jusqu'à la sortie.
+    audio_frames = [f for f in sink.captured if isinstance(f, TTSAudioRawFrame)]
+    assert len(audio_frames) >= 1, (
+        f"Aucune TTSAudioRawFrame n'a atteint le sink. "
+        f"Types capturés : {captured_types}"
+    )
+    # Les octets PCM bidons du FakeTTSAdapter doivent ressortir intacts
+    assert all(f.audio == b"\x00\x01\x02\x03" for f in audio_frames)
