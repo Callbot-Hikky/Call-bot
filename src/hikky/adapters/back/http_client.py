@@ -37,18 +37,32 @@ class BackHttpClient:
     async def get(self, path: str) -> dict[str, Any]:
         return await self._request("GET", path)
 
-    async def post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._request("POST", path, json=json)
+    async def post(
+        self,
+        path: str,
+        json: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request("POST", path, json=json, extra_headers=headers)
 
     async def _request(
-        self, method: str, path: str, *, json: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
+        merged_headers = (
+            self._headers if not extra_headers else {**self._headers, **extra_headers}
+        )
         last_error: Exception | None = None
         for attempt in range(2):  # 1 try + 1 retry
             try:
                 response = await self._client.request(
-                    method, url, json=json, headers=self._headers
+                    method, url, json=json, headers=merged_headers
                 )
             except httpx.HTTPError as exc:
                 last_error = exc

@@ -96,13 +96,16 @@ async def test_start_frame_triggers_rgpd_announcement_and_session_begin():
 
     # Logs : début d'appel enregistré
     assert log.entries[0][0] == "start"
-    # Frames poussées : StartFrame propagée, puis TextFrame d'annonce
+    # Frames poussées : StartFrame propagée, puis une séquence
+    # LLMFullResponseStartFrame → TextFrame d'annonce → LLMFullResponseEndFrame
+    # (la séquence Start/End est nécessaire pour que Pipecat TTSService
+    # initialise son audio_context et ne droppe pas l'audio).
     assert isinstance(captured[0][0], StartFrame)
-    text_frame = captured[1][0]
-    assert isinstance(text_frame, TextFrame)
-    assert "Cet appel peut être enregistré" in text_frame.text
-    assert "Chez Test" in text_frame.text
-    assert "Que puis-je" in text_frame.text  # greeting
+    text_frames = [f for f, _ in captured if type(f) is TextFrame]
+    assert len(text_frames) == 1
+    assert "Cet appel peut être enregistré" in text_frames[0].text
+    assert "Chez Test" in text_frames[0].text
+    assert "Que puis-je" in text_frames[0].text  # greeting
 
 
 async def test_transcription_frame_runs_a_turn_and_emits_llm_reply():

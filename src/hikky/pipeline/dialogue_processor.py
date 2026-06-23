@@ -34,6 +34,8 @@ from typing import Any
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
     StartFrame,
     TextFrame,
     TranscriptionFrame,
@@ -92,7 +94,21 @@ class DialogueProcessor(FrameProcessor):
             RGPD_ANNOUNCEMENT_TEMPLATE.format(name=self._session.context.name)
             + self._session.context.greeting
         )
-        await self.push_frame(TextFrame(text=announcement))
+        await self._emit_speech(announcement)
+
+    async def _emit_speech(self, text: str) -> None:
+        """Émet une séquence de frames consommable par Pipecat `TTSService`.
+
+        `TTSService` n'initialise son `audio_context` qu'à la réception d'une
+        `LLMFullResponseStartFrame` ; sans ça, les `TTSAudioRawFrame` produites
+        par notre wrapper sont silencieusement droppées (« unable to append
+        audio to context »). On encadre donc chaque TextFrame à prononcer
+        par les frames de cycle d'une « réponse LLM » — ce qui revient à dire
+        à Pipecat : voici un tour de parole du bot.
+        """
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(TextFrame(text=text))
+        await self.push_frame(LLMFullResponseEndFrame())
 
     async def _handle_user_turn(self, user_text: str, direction: FrameDirection) -> None:
         if self._closed:
@@ -121,9 +137,7 @@ class DialogueProcessor(FrameProcessor):
                     preferred_slot=None,
                     note=fallback.reason,
                 )
-            await self.push_frame(
-                TextFrame(text=self._session.context.fallback_message)
-            )
+            await self._emit_speech(self._session.context.fallback_message)
             await self._session.end_with(fallback.outcome)
             await self.push_frame(EndFrame())
             self._closed = True
@@ -132,13 +146,13 @@ class DialogueProcessor(FrameProcessor):
         outcome = await self._session.finalize_if_complete(self._customer_phone)
         if outcome is not None:
             logger.info("call finalized", extra={"outcome": str(outcome)})
-            await self.push_frame(TextFrame(text=result.bot_says))
+            await self._emit_speech(result.bot_says)
             await self.push_frame(EndFrame())
             self._closed = True
             return
 
         # Tour normal : on émet la réponse du LLM
-        await self.push_frame(TextFrame(text=result.bot_says))
+        await self._emit_speech(result.bot_says)
 
 
 class SlotExtractor:
