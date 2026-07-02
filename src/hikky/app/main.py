@@ -30,14 +30,22 @@ validé sur la machine GPU avec un vrai appel Twilio.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from hikky.adapters.telephony.asterisk_audiosocket_server import (
+    AudioSocketServerConfig,
+    AudioSocketServerDeps,
+    start_server as start_audiosocket_server,
+)
 from hikky.domain.outcomes import CallOutcome
 from hikky.exceptions import UnknownRestaurant
 from hikky.observability.logging import (
@@ -69,9 +77,84 @@ class AppDependencies:
     tts_sample_rate: int = 22050
 
 
-def create_app(deps: AppDependencies | None = None) -> FastAPI:
+def _audiosocket_config_from_env() -> AudioSocketServerConfig | None:
+    """Charge la config du serveur AudioSocket depuis les variables d'env.
+
+    Retourne `None` si `HIKKY_AUDIOSOCKET_ENABLED` n'est pas à `1` — dans
+    ce cas le serveur AudioSocket n'est pas démarré (le transport Twilio
+    continue de fonctionner normalement).
+
+    Variables :
+    - `HIKKY_AUDIOSOCKET_ENABLED` : "1" pour activer (défaut : "0")
+    - `HIKKY_AUDIOSOCKET_HOST` : bind host (défaut : "0.0.0.0")
+    - `HIKKY_AUDIOSOCKET_PORT` : bind port (défaut : 6666)
+    - `HIKKY_AUDIOSOCKET_DEFAULT_CALLED_NUMBER` : fallback quand Asterisk
+      n'envoie pas de numéro (défaut : "+33000000000")
+    - `HIKKY_AUDIOSOCKET_SMOKE_TEST` : "1" pour le mode smoke test
+      (défaut : "0") — utile pour valider le transport avant d'avoir
+      les vrais adapters IA en place.
+    """
+    if os.environ.get("HIKKY_AUDIOSOCKET_ENABLED", "0") != "1":
+        return None
+    return AudioSocketServerConfig(
+        host=os.environ.get("HIKKY_AUDIOSOCKET_HOST", "0.0.0.0"),
+        port=int(os.environ.get("HIKKY_AUDIOSOCKET_PORT", "6666")),
+        default_called_number=os.environ.get(
+            "HIKKY_AUDIOSOCKET_DEFAULT_CALLED_NUMBER", "+33000000000"
+        ),
+        smoke_test=os.environ.get("HIKKY_AUDIOSOCKET_SMOKE_TEST", "0") == "1",
+    )
+
+
+def create_app(
+    deps: AppDependencies | None = None,
+    audiosocket_config: AudioSocketServerConfig | None = None,
+) -> FastAPI:
     configure_json_logging()
-    app = FastAPI(title="Hikky IA")
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Démarre le serveur AudioSocket en parallèle de FastAPI si activé.
+
+        Si `audiosocket_config is None` OU si `deps is None` (pas d'IA
+        configurée), on skip — l'app démarre normalement pour servir
+        Twilio et `/health`.
+        """
+        server_task: asyncio.Task | None = None
+        server = None
+        if audiosocket_config is not None and deps is not None:
+            audiosocket_deps = AudioSocketServerDeps(
+                session_factory=deps.session_factory,
+                restaurant_context_port=deps.restaurant_context_port,
+                stt_adapter=deps.stt_adapter,
+                tts_adapter=deps.tts_adapter,
+            )
+            server, _adapter = await start_audiosocket_server(
+                audiosocket_deps, audiosocket_config
+            )
+            app.state.audiosocket_server = server
+            server_task = asyncio.create_task(server.serve_forever())
+            logger.info(
+                "AudioSocket server started",
+                extra={
+                    "host": audiosocket_config.host,
+                    "port": audiosocket_config.port,
+                    "smoke_test": audiosocket_config.smoke_test,
+                },
+            )
+        try:
+            yield
+        finally:
+            if server is not None:
+                server.close()
+                await server.wait_closed()
+            if server_task is not None:
+                server_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await server_task
+                logger.info("AudioSocket server stopped")
+
+    app = FastAPI(title="Hikky IA", lifespan=lifespan)
     app.state.deps = deps
 
     @app.get("/health")
@@ -213,4 +296,8 @@ def _build_default_dependencies() -> AppDependencies | None:
 # Instance par défaut, utilisable par `uvicorn hikky.app.main:app`. Si les
 # variables d'environnement requises sont présentes, les vraies dépendances
 # sont câblées ; sinon l'app accepte `/health` mais refuse `/twilio/...`.
-app = create_app(deps=_build_default_dependencies())
+# Le serveur AudioSocket est démarré si `HIKKY_AUDIOSOCKET_ENABLED=1`.
+app = create_app(
+    deps=_build_default_dependencies(),
+    audiosocket_config=_audiosocket_config_from_env(),
+)
