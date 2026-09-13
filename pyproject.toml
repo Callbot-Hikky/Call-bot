@@ -22,6 +22,15 @@ voice = [
     "llama-cpp-python>=0.2.79",
     "piper-tts>=1.2",
 ]
+# XTTS-v2. Bornes strictes : coqui-tts exige transformers>=4.57, et
+# transformers>=5 supprime des symboles qu'il utilise encore. Coqui
+# n'ayant plus de mainteneur, cette fenetre ne se reparera pas seule.
+# Licence CPML : usage non commercial uniquement.
+xtts = [
+    "coqui-tts>=0.27",
+    "transformers>=4.57,<5",
+    "torch>=2.5",
+]
 pipeline = [
     "pipecat-ai>=0.0.40",
 ]

@@ -117,3 +117,69 @@ async def test_unbind_call_removes_state():
         await adapter.send_audio("c-1", b"\x00")
     # unbind idempotent
     adapter.unbind_call("c-1")
+
+
+# ── Envoi groupe : trames de 20 ms, un seul drain ───────────────────────
+#
+# Asterisk attend des trames de 20 ms : un paquet plus gros casse la
+# lecture. Mais un drain reseau toutes les 20 ms a travers un tunnel
+# distant coute ~100 ms par trame, soit 28 s pour 4 s de parole. On
+# ecrit donc plusieurs trames d affilee, avec un seul drain.
+
+class _CountingWriter:
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.drains = 0
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        self.drains += 1
+
+    def close(self) -> None:
+        return None
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+async def test_send_frames_emits_one_packet_per_frame():
+    import struct
+
+    from hikky.adapters.telephony.audiosocket_protocol import MessageType
+
+    adapter = AsteriskAudioSocketAdapter()
+    writer = _CountingWriter()
+    adapter.bind_call("c1", writer)
+    frames = [b"\x01\x02" * 160 for _ in range(5)]
+    await adapter.send_audio_frames("c1", frames)
+
+    data = bytes(writer.written)
+    pos, count = 0, 0
+    while pos + 3 <= len(data):
+        msg_type = data[pos]
+        (length,) = struct.unpack(">H", data[pos + 1 : pos + 3])
+        if msg_type == MessageType.AUDIO_PCM_8K:
+            assert length == 320, f"trame de {length} octets, Asterisk attend 320"
+            count += 1
+        pos += 3 + length
+    assert count == 5
+
+
+async def test_send_frames_drains_once_for_the_whole_batch():
+    adapter = AsteriskAudioSocketAdapter()
+    writer = _CountingWriter()
+    adapter.bind_call("c1", writer)
+    await adapter.send_audio_frames("c1", [b"\x00" * 320 for _ in range(25)])
+    assert writer.drains == 1, f"{writer.drains} drains pour 25 trames"
+
+
+async def test_send_frames_on_unknown_call_raises():
+    import pytest
+
+    from hikky.exceptions import TelephonyError
+
+    adapter = AsteriskAudioSocketAdapter()
+    with pytest.raises(TelephonyError):
+        await adapter.send_audio_frames("inconnu", [b"\x00" * 320])

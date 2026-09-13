@@ -4,7 +4,12 @@ from datetime import datetime
 from typing import Any
 
 from hikky.domain.dialogue_engine import DialogueEngine, TurnResult
-from hikky.domain.fallback_policy import FallbackDecision, FallbackPolicy
+from hikky.domain.fallback_policy import (
+    FallbackDecision,
+    FallbackPolicy,
+    is_clarification_request,
+    is_correction,
+)
 from hikky.domain.outcomes import CallOutcome
 from hikky.domain.reservation_intent import ReservationIntent
 from hikky.domain.restaurant_context import RestaurantContext
@@ -60,12 +65,27 @@ class CallSession:
             user_text=user_text,
             current_intent=before,
             slot_updates=slot_updates,
+            context=self.context,
         )
-        if result.updated_intent == before:
-            self._state.consecutive_no_progress_turns += 1
-        else:
+        intent = result.updated_intent
+
+        if is_correction(user_text):
+            # Le client dément une information retenue : on l'efface au
+            # lieu de la lui resservir. Sans ça, une erreur de
+            # transcription devient définitive.
+            contested = _contested_slot(user_text, intent)
+            if contested is not None:
+                intent = intent.without(contested)
+
+        if intent != before:
             self._state.consecutive_no_progress_turns = 0
-        self._state.intent = result.updated_intent
+        elif is_clarification_request(user_text) or is_correction(user_text):
+            # Demande de répétition ou contestation : c'est le bot qui a
+            # échoué, pas le client qui piétine. Ne pas l'incriminer.
+            pass
+        else:
+            self._state.consecutive_no_progress_turns += 1
+        self._state.intent = intent
         self._state.last_bot_message = result.bot_says
         return result
 
@@ -78,6 +98,15 @@ class CallSession:
             user_requested_human=user_requested_human,
             group_size=group_size,
         )
+
+    @property
+    def intent(self) -> ReservationIntent:
+        """Intention en cours de construction.
+
+        Exposée pour que `run_turn` puisse récapituler la réservation
+        avant de la créer — la barrière de confirmation en dépend.
+        """
+        return self._state.intent
 
     @property
     def last_availability_check(self) -> bool | None:
@@ -131,6 +160,43 @@ class CallSession:
         await self._end(CallOutcome.RESERVATION_CREATED)
         return CallOutcome.RESERVATION_CREATED
 
+    # ── Interface du ConversationBrain ──────────────────────────────────
+    #
+    # Le modèle conduit la conversation ; le code garde la main sur ce qui
+    # touche la base. `book` revérifie systématiquement la complétude, la
+    # plage d'ouverture et la disponibilité, même quand le LLM affirme
+    # qu'il faut réserver.
+
+    def apply_slots(self, slots: dict[str, Any]) -> None:
+        intent = self._state.intent
+        if (day := slots.get("date")) is not None:
+            intent = intent.with_date(day)
+        if (hour := slots.get("time")) is not None:
+            intent = intent.with_time(hour)
+        if (size := slots.get("party_size")) is not None:
+            intent = intent.with_party_size(int(size))
+        if (name := slots.get("customer_name")) is not None:
+            intent = intent.with_customer_name(str(name))
+        self._state.intent = intent
+
+    def clear_slots(self, names: list[str]) -> None:
+        intent = self._state.intent
+        for name in names:
+            intent = intent.without(name)
+        self._state.intent = intent
+
+    async def check_availability(self, when: datetime, party_size: int) -> bool:
+        available = await self._reservation.check_availability(
+            restaurant_id=self.context.id,
+            date_time=when,
+            party_size=party_size,
+        )
+        self._state.last_availability_check = available
+        return available
+
+    async def book(self, customer_phone: str | None) -> CallOutcome | None:
+        return await self.finalize_if_complete(customer_phone)
+
     async def end_with(self, outcome: CallOutcome) -> None:
         await self._end(outcome)
 
@@ -141,3 +207,28 @@ class CallSession:
         duration = (now - (self._state.started_at or now)).total_seconds()
         await self._log.end(self.call_id, outcome, duration)
         self._state.ended = True
+
+
+_SLOT_KEYWORDS = (
+    ("customer_name", ("nom", "appelle", "appelais", "monsieur", "madame")),
+    ("time", ("heure", "midi", "soir")),
+    ("date", ("jour", "date", "demain", "lundi", "mardi", "mercredi",
+              "jeudi", "vendredi", "samedi", "dimanche")),
+    ("party_size", ("personne", "convive", "combien")),
+)
+
+
+def _contested_slot(text: str, intent: ReservationIntent) -> str | None:
+    """Devine quel slot le client conteste.
+
+    Heuristique volontairement simple et testable. À défaut d'indice
+    lexical, on efface le nom : c'est de loin le slot le plus exposé aux
+    erreurs de transcription.
+    """
+    lowered = text.lower()
+    for slot, keywords in _SLOT_KEYWORDS:
+        if any(k in lowered for k in keywords) and getattr(intent, slot) is not None:
+            return slot
+    if intent.customer_name is not None:
+        return "customer_name"
+    return None

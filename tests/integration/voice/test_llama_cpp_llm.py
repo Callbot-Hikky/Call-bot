@@ -28,6 +28,7 @@ async def test_complete_loads_model_with_constructor_args(fake_llama_module):
         model_path="/models/mistral.gguf",
         n_ctx=8192,
         n_gpu_layers=99,
+        flash_attn=True,
         verbose=False,
     )
 
@@ -104,3 +105,36 @@ async def test_model_loaded_once_across_calls(fake_llama_module):
     await adapter.complete([{"role": "user", "content": "a"}])
     await adapter.complete([{"role": "user", "content": "b"}])
     assert llama_cls.call_count == 1
+
+
+# ── Acces serialise au modele ───────────────────────────────────────────
+#
+# Crash en production : llama.cpp n'est pas thread-safe. L'extracteur et
+# le conversationnel partagent la meme instance ; deux generations qui se
+# chevauchent corrompent l'etat interne et tuent le processus :
+#   IndexError: index 917 is out of bounds for axis 0 with size 5
+
+async def test_concurrent_completions_are_serialised(fake_llama_module):
+    import asyncio
+
+    _, model = fake_llama_module
+    en_cours = []
+    chevauchements = []
+
+    def _lent(*args, **kwargs):
+        import time
+
+        en_cours.append(1)
+        if len(en_cours) > 1:
+            chevauchements.append(1)
+        time.sleep(0.05)
+        en_cours.pop()
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    model.create_chat_completion.side_effect = _lent
+    adapter = LlamaCppLLMAdapter(model_path="/m.gguf")
+
+    await asyncio.gather(
+        *(adapter.complete([{"role": "user", "content": f"m{i}"}]) for i in range(4))
+    )
+    assert not chevauchements, "generations concurrentes : llama.cpp va crasher"

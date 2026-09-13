@@ -1,0 +1,48 @@
+# Stack Docker du POC Hikky : uniquement Asterisk pour l'instant.
+# Le bot Python (uvicorn hikky.app.main:app + serveur AudioSocket sur :6666)
+# tourne sur l'hôte, PAS dans un container — la boucle audio est trop
+# sensible à la latence pour rajouter un réseau bridge Docker au milieu.
+#
+# Lancement :
+#     cd docker
+#     docker compose up asterisk
+#
+# Zoiper se configure ensuite pour pointer sur `localhost:5060` (ou l'IP
+# de la machine si Zoiper est sur un autre poste), extension 1000,
+# mot de passe = SIP_EXTENSION_PASSWORD (défaut 1000).
+
+services:
+  asterisk:
+    build:
+      context: ./asterisk
+    image: hikky/asterisk:poc
+    container_name: hikky-asterisk
+    restart: unless-stopped
+
+    # SIP + RTP. Sur Docker Desktop (Mac/Windows) le mapping fonctionne
+    # out-of-the-box. Sur Linux, envisager `network_mode: host` pour
+    # éviter le NAT interne Docker qui casse souvent SIP/RTP.
+    ports:
+      - "5060:5060/udp"
+      - "10000-10100:10000-10100/udp"
+
+    environment:
+      # Adresse où le container va joindre le bot Python. Sur Docker
+      # Desktop Mac/Windows, host.docker.internal résout vers l'hôte.
+      BOT_HOST: ${BOT_HOST:-host.docker.internal}
+      BOT_PORT: ${BOT_PORT:-6666}
+      # Mot de passe SIP de l'extension 1000. À écraser en démo publique.
+      SIP_EXTENSION_PASSWORD: ${SIP_EXTENSION_PASSWORD:-1000}
+
+    # Sur Linux, cette ligne rend `host.docker.internal` accessible depuis
+    # le container (déjà présent nativement sur Docker Desktop Mac/Win).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Healthcheck simple : le CLI Asterisk répond.
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

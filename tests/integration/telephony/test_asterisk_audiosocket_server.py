@@ -11,10 +11,8 @@ uniquement le transport.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time
+from datetime import time
 from uuid import UUID, uuid4
-
-import pytest
 
 from hikky.adapters.telephony.asterisk_audiosocket_server import (
     AudioSocketServerConfig,
@@ -32,7 +30,6 @@ from hikky.domain.restaurant_context import (
     RestaurantContext,
     RestaurantRules,
 )
-
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 

@@ -119,3 +119,79 @@ async def test_finalize_refuses_when_date_outside_opening_hours():
     assert reservation.reservations == {}
     assert notif.sent == []
     assert session.last_within_opening_hours is False
+
+
+async def test_contested_name_is_cleared_from_the_intent():
+    """Un slot doit pouvoir etre efface quand le client le conteste.
+
+    Sans ca, une erreur de transcription devient definitive : le bot a
+    appele le client « Monsieur Medica » jusqu'a le faire raccrocher.
+    """
+    from hikky.domain.reservation_intent import ReservationIntent
+
+    intent = ReservationIntent().with_customer_name("Medica")
+    cleared = intent.without("customer_name")
+    assert cleared.customer_name is None
+    assert "customer_name" in cleared.missing_slots()
+
+
+async def test_clearing_an_unknown_slot_is_a_no_op():
+    from hikky.domain.reservation_intent import ReservationIntent
+
+    intent = ReservationIntent().with_party_size(4)
+    assert intent.without("inexistant").party_size == 4
+
+
+async def test_contesting_the_name_clears_it_and_does_not_count_as_stalling():
+    """Scenario reel complet : nom mal transcrit, puis conteste trois fois."""
+    session, _, _, _ = await _make_session(["ok", "ok", "ok"])
+
+    await session.process_user_turn("Medica", {"customer_name": "Medica"})
+    assert session.intent.customer_name == "Medica"
+
+    await session.process_user_turn("Je t'ai jamais dit que je m'appelais Medica", {})
+    assert session.intent.customer_name is None, "le slot conteste doit etre efface"
+    assert session.check_fallback(user_requested_human=False, group_size=None) is None
+
+
+async def test_apply_slots_fills_the_intent():
+    from datetime import date as _d
+    from datetime import time as _t
+
+    session, _, _, _ = await _make_session([])
+    session.apply_slots({"date": _d(2026, 7, 22), "time": _t(20, 0),
+                         "party_size": 4, "customer_name": "Dupont"})
+    assert session.intent.is_complete()
+
+
+async def test_clear_slots_removes_contested_information():
+    session, _, _, _ = await _make_session([])
+    session.apply_slots({"customer_name": "Medica"})
+    session.clear_slots(["customer_name"])
+    assert session.intent.customer_name is None
+
+
+async def test_check_availability_delegates_to_the_port():
+    session, reservation, _, _ = await _make_session([])
+    reservation.set_availability("r-1", available=False)
+    assert await session.check_availability(datetime(2026, 7, 1, 20), 4) is False
+
+
+async def test_book_creates_the_reservation_and_notifies():
+    from datetime import date as _d
+    from datetime import time as _t
+
+    session, reservation, _, notif = await _make_session([])
+    reservation.set_availability("r-1", available=True)
+    session.apply_slots({"date": _d(2026, 7, 1), "time": _t(20, 0),
+                         "party_size": 4, "customer_name": "Dupont"})
+    outcome = await session.book("+33600000000")
+    assert outcome == CallOutcome.RESERVATION_CREATED
+    assert len(reservation.reservations) == 1
+    assert notif.sent
+
+
+async def test_book_refuses_an_incomplete_intent():
+    session, reservation, _, _ = await _make_session([])
+    assert await session.book(None) is None
+    assert len(reservation.reservations) == 0
