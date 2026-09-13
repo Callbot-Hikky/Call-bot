@@ -20,10 +20,10 @@ import json
 import logging
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any
 
-from hikky.pipeline.dialogue_processor import SlotExtractor
+from hikky.domain.turn_runner import SlotExtractor
 from hikky.ports.language_model import LanguageModelPort
 
 logger = logging.getLogger("hikky.slot_extractor")
@@ -34,13 +34,28 @@ réservation de restaurant.
 Étant donnée la dernière phrase de l'utilisateur (en français), extrais \
 UNIQUEMENT les informations clairement présentes parmi :
 
-- "date_time" : date et heure de la réservation, au format ISO 8601 \
-"YYYY-MM-DDTHH:MM" (24h). Résous les expressions relatives ("demain", \
-"ce soir", "vendredi") par rapport à la date du jour.
+- "date" : jour de la réservation, format ISO "YYYY-MM-DD". Résous les \
+expressions relatives ("demain", "vendredi", "ce soir") par rapport à \
+la date du jour.
+- "time" : heure de la réservation, format "HH:MM" (24h). UNIQUEMENT si \
+une heure précise est énoncée.
 - "party_size" : nombre de personnes, entier strictement positif.
 - "customer_name" : nom du client (chaîne).
 
 Date du jour : {today_iso} ({weekday_name}).
+
+RÈGLE ABSOLUE — N'INVENTE JAMAIS.
+
+"date" et "time" sont INDÉPENDANTS : émets celui que tu connais, omets \
+l'autre. Un moment de journée vague ("matin", "midi", "soirée", \
+"dans l'après-midi") n'est PAS une heure — n'émets alors pas "time", \
+mais émets bien "date" si le jour est connu. C'est à l'assistant de \
+demander l'heure exacte, pas à toi de la choisir.
+
+De même, n'émets "party_size" que si un nombre de personnes est \
+réellement énoncé, et "customer_name" que si un nom est réellement \
+donné. Un slot absent doit rester absent : il vaut mieux redemander \
+que réserver sur une supposition.
 
 Réponds par UN SEUL objet JSON minifié contenant uniquement les clés \
 des slots détectés (omets les autres). Si rien n'est extrait, réponds \
@@ -49,10 +64,15 @@ du JSON.
 
 Exemples :
 - "Je voudrais réserver" → {{}}
-- "Demain à 20 heures pour 4" → {{"date_time": "{tomorrow_iso}T20:00", \
-"party_size": 4}}
+- "Demain à 20 heures pour 4" → {{"date": "{tomorrow_iso}", \
+"time": "20:00", "party_size": 4}}
 - "Au nom de Dupont" → {{"customer_name": "Dupont"}}
 - "On serait 6" → {{"party_size": 6}}
+- "demain matin" → {{"date": "{tomorrow_iso}"}}   (jour connu, heure inconnue)
+- "dans la soirée" → {{}}   (ni jour ni heure precise)
+- "plutôt vers midi" → {{}}   (moment vague, pas une heure)
+- "demain à midi" → {{"date": "{tomorrow_iso}", "time": "12:00"}}
+- "à vingt heures" → {{"time": "20:00"}}   (heure seule, jour inconnu)
 """
 
 _WEEKDAYS_FR = [
@@ -104,9 +124,10 @@ class LLMSlotExtractor(SlotExtractor):
             logger.warning("LLM slot extraction call failed", exc_info=True)
             return {}
 
-        return self._parse(raw)
+        return self._parse(raw, now)
 
-    def _parse(self, raw: str) -> dict[str, Any]:
+    def _parse(self, raw: str, now: datetime | None = None) -> dict[str, Any]:
+        today = (now or self._clock()).date()
         match = _JSON_BLOCK.search(raw or "")
         if not match:
             logger.debug("No JSON object in LLM reply: %r", raw)
@@ -121,7 +142,24 @@ class LLMSlotExtractor(SlotExtractor):
 
         out: dict[str, Any] = {}
 
-        dt_raw = parsed.get("date_time")
+        dt_raw = parsed.get("date_time")  # retro-compat
+
+        day_raw = parsed.get("date")
+        if isinstance(day_raw, str):
+            try:
+                parsed_day = _sane_date(date.fromisoformat(day_raw), today)
+            except ValueError:
+                logger.debug("Bad ISO date from LLM: %r", day_raw)
+            else:
+                if parsed_day is not None:
+                    out["date"] = parsed_day
+
+        time_raw = parsed.get("time")
+        if isinstance(time_raw, str):
+            try:
+                out["time"] = time.fromisoformat(time_raw)
+            except ValueError:
+                logger.debug("Bad ISO time from LLM: %r", time_raw)
         if isinstance(dt_raw, str):
             try:
                 out["date_time"] = datetime.fromisoformat(dt_raw)
@@ -137,3 +175,30 @@ class LLMSlotExtractor(SlotExtractor):
             out["customer_name"] = name_raw.strip()
 
         return out
+
+
+# Fenêtre de réservation plausible. Au-delà, la valeur est jetée plutôt
+# que corrigée : mieux vaut redemander que réserver n'importe quand.
+_MAX_DAYS_AHEAD = 366
+
+
+def _sane_date(day: date, today: date) -> date | None:
+    """Corrige l'année hallucinée par le modèle.
+
+    Constaté en conditions réelles : sur « demain » le LLM a renvoyé
+    2023-07-22 — son année d'entraînement — alors qu'on était en 2026.
+    Une date passée est réinterprétée comme sa prochaine occurrence ;
+    une date absurdement lointaine est abandonnée.
+    """
+    if day >= today:
+        return day if (day - today).days <= _MAX_DAYS_AHEAD else None
+
+    for year in (today.year, today.year + 1):
+        try:
+            candidate = day.replace(year=year)
+        except ValueError:  # 29 février d'une année non bissextile
+            continue
+        if candidate >= today:
+            logger.info("année corrigée: %s -> %s", day, candidate)
+            return candidate
+    return None

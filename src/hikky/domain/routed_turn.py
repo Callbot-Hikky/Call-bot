@@ -1,0 +1,237 @@
+"""Tour de dialogue piloté par le code, intelligence confiée au modèle.
+
+Répartition des rôles, établie par la mesure et non par principe :
+
+- **le code** tient l'état et choisit la question suivante — les deux
+  quantisations testées reposaient trois fois la même question après
+  avoir reçu la réponse ;
+- **le modèle** comprend les phrases (l'extracteur ne s'est jamais
+  trompé) et répond aux questions hors script, où il excelle.
+
+Conséquence sur la latence : sur un tour ordinaire, un seul appel LLM au
+lieu de deux. L'appel conversationnel n'a lieu que si le client pose
+réellement une question.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from hikky.domain.outcomes import CallOutcome
+from hikky.domain.phraseur import Intention
+from hikky.domain.question_router import Action, phrase_for_slot, route_turn
+
+logger = logging.getLogger("hikky.routed_turn")
+conversation = logging.getLogger("hikky.conversation")
+
+MAX_HISTORY_MESSAGES = 12
+
+_JOURS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+_MOIS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+         "août", "septembre", "octobre", "novembre", "décembre")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnOutcome:
+    should_end: bool
+    outcome: CallOutcome | None = None
+    awaiting_confirmation: bool = False
+    slots: dict[str, Any] = field(default_factory=dict)
+
+
+def _heure_fr(hour: Any) -> str:
+    if hour.hour == 12 and hour.minute == 0:
+        return "midi"
+    if hour.hour == 0 and hour.minute == 0:
+        return "minuit"
+    if hour.minute == 0:
+        return f"{hour.hour} heures"
+    return f"{hour.hour} heures {hour.minute}"
+
+
+def build_recap(intent: Any) -> str:
+    """Récapitulatif complet, généré par le code.
+
+    Le modèle produisait « Puis-je confirmer votre réservation ? » sans
+    dire quoi, puis oubliait le nom. Ce message doit être exact.
+    """
+    size = intent.party_size
+    couverts = "une personne" if size == 1 else f"{size} personnes"
+    jour = intent.date
+    quand = (
+        f"le {_JOURS[jour.weekday()]} {jour.day} {_MOIS[jour.month - 1]}"
+        if jour is not None
+        else ""
+    )
+    heure = f" à {_heure_fr(intent.time)}" if intent.time is not None else ""
+    nom = f", au nom de {intent.customer_name}" if intent.customer_name else ""
+    return f"Je récapitule : {couverts} {quand}{heure}{nom}. C'est bien cela ?"
+
+
+def _refus_si_groupe_trop_grand(session: Any) -> str | None:
+    """Message de refus si la taille du groupe dépasse le plafond, sinon None.
+
+    Le plafond vient du contexte du restaurant (`rules.max_group_size`, alimenté
+    par la politique du backend). Au-delà, un très grand groupe relève d'un
+    échange humain — le bot le dit clairement plutôt que d'enchaîner sur
+    « souhaitez-vous une autre heure ? », qui n'a jamais de sens ici.
+    """
+    rules = getattr(getattr(session, "context", None), "rules", None)
+    max_group = getattr(rules, "max_group_size", None)
+    party = getattr(getattr(session, "intent", None), "party_size", None)
+    if max_group is None or party is None or party <= max_group:
+        return None
+    return (
+        f"Je suis désolé, pour un groupe de plus de {max_group} personnes je ne "
+        "peux pas prendre la réservation par téléphone. Souhaitez-vous réserver "
+        "pour un plus petit groupe ?"
+    )
+
+
+async def run_routed_turn(
+    *,
+    session: Any,
+    user_text: str,
+    customer_phone: str | None,
+    history: list[dict[str, str]],
+    extractor: Any,
+    answerer: Any,
+    awaiting_confirmation: bool,
+    speak: Callable[[str], Awaitable[None]],
+    recent_phrasings: set[str] | None = None,
+    phraseur: Any = None,
+) -> TurnOutcome:
+    # 1. Comprendre — seul rôle du modèle sur un tour ordinaire.
+    slots: dict[str, Any] = {}
+    if extractor is not None:
+        slots = await extractor.extract(user_text)
+        if slots:
+            conversation.info("  extrait : %s", slots)
+            session.apply_slots(slots)
+
+    # Plafond de groupe : au-delà, l'assistant ne prend pas la réservation par
+    # téléphone. On refuse tôt et clairement, plutôt que de proposer d'autres
+    # horaires — ce qui n'aiderait jamais pour un groupe trop grand et laissait
+    # croire à tort que le problème venait de l'heure.
+    refus_taille = _refus_si_groupe_trop_grand(session)
+    if refus_taille is not None:
+        logger.info("groupe au-delà du plafond — réservation refusée")
+        await _remember(history, user_text, refus_taille)
+        await speak(refus_taille)
+        return TurnOutcome(should_end=False, slots=slots)
+
+    # 2. Décider — sans LLM : l'état suffit.
+    decision = route_turn(session.intent, user_text, awaiting_confirmation)
+    conversation.info("  route   : %s", decision.action.value)
+
+    # 3. Agir.
+    if decision.action is Action.ANSWER_QUESTION:
+        # Le client interroge : c'est ici que l'intelligence sert.
+        reply = await answerer.answer(
+            user_text=user_text,
+            intent=session.intent,
+            context=session.context,
+            history=history,
+        )
+        reply = _ensure_progress(reply, session.intent, recent_phrasings)
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(
+            should_end=False,
+            awaiting_confirmation=awaiting_confirmation,
+            slots=slots,
+        )
+
+    if decision.action is Action.BOOK:
+        outcome = await session.book(customer_phone)
+        if outcome is None:
+            logger.error("RESERVATION NON CRÉÉE — créneau indisponible ou hors horaires")
+            reply = "Ce créneau n'est pas disponible. Souhaitez-vous une autre heure ?"
+            await _remember(history, user_text, reply)
+            await speak(reply)
+            return TurnOutcome(should_end=False, slots=slots)
+
+        intent = session.intent
+        logger.info(
+            "RESERVATION CRÉÉE : %s, %s personnes, %s (%s)",
+            intent.date_time, intent.party_size, intent.customer_name, outcome,
+        )
+        reply = (
+            f"C'est noté, {intent.customer_name}. "
+            f"Nous vous attendons {_JOURS[intent.date.weekday()]} "
+            f"{intent.date.day} {_MOIS[intent.date.month - 1]} "
+            f"à {_heure_fr(intent.time)}. Bonne journée !"
+        )
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=True, outcome=outcome, slots=slots)
+
+    if decision.action is Action.CORRECT:
+        reply = "D'accord. Qu'est-ce que je corrige ?"
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=False, slots=slots)
+
+    if decision.action is Action.CONFIRM:
+        reply = build_recap(session.intent)
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=False, awaiting_confirmation=True, slots=slots)
+
+    # ASK_SLOT — le cas nominal. Le code choisit l'information à demander,
+    # le modèle la met en mots en tenant compte de ce que le client vient
+    # de dire. Sans ce dernier point, le bot récitait la même phrase quel
+    # que soit l'interlocuteur : c'est ce qui le faisait sonner robotique.
+    figee = phrase_for_slot(decision.slot or "", recent_phrasings or set())
+    if phraseur is not None:
+        reply = await phraseur.formuler(
+            Intention(
+                besoin="demander_slot",
+                slot=decision.slot,
+                repli=figee,
+                derniere_phrase_client=user_text,
+            )
+        )
+    else:
+        reply = figee
+    if recent_phrasings is not None:
+        recent_phrasings.add(reply)
+    await _remember(history, user_text, reply)
+    await speak(reply)
+    return TurnOutcome(
+        should_end=False, awaiting_confirmation=awaiting_confirmation, slots=slots
+    )
+
+
+def _ensure_progress(
+    reply: str, intent: Any, recent: set[str] | None
+) -> str:
+    """Après avoir répondu au client, on relance sur ce qui manque.
+
+    Sans ça, une réponse comme « Nous sommes fermés le dimanche. » laisse
+    la conversation en suspens.
+    """
+    reply = (reply or "").strip()
+    if not reply:
+        reply = "Pardon, pouvez-vous répéter ?"
+    if reply.rstrip().endswith("?"):
+        return reply
+    missing = intent.missing_slots()
+    from hikky.domain.question_router import SLOT_ORDER
+
+    for slot in SLOT_ORDER:
+        if slot in missing:
+            return f"{reply} {phrase_for_slot(slot, recent or set())}"
+    return f"{reply} Puis-je confirmer votre réservation ?"
+
+
+async def _remember(
+    history: list[dict[str, str]], user_text: str, reply: str
+) -> None:
+    history.append({"role": "user", "content": user_text})
+    history.append({"role": "assistant", "content": reply})
+    if len(history) > MAX_HISTORY_MESSAGES:
+        del history[: len(history) - MAX_HISTORY_MESSAGES]

@@ -1,0 +1,33 @@
+[Unit]
+Description=Tunnel SSH Hikky (serveur d'appel -> bot GPU RunPod)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/hikky-bot-tunnel.env
+
+# -N : pas de shell distant, uniquement le forwarding.
+# -L 6666:localhost:6666 : le port local 6666 du serveur est relayé vers le
+#   6666 du pod (où écoute le serveur AudioSocket du bot).
+# ExitOnForwardFailure : si le forward échoue, on sort pour que systemd relance.
+# ServerAlive* : détecte une coupure réseau en ~30 s.
+#
+# Le port SSH public du pod change à chaque redémarrage du pod : il est donc
+# passé via POD_PORT dans /etc/hikky-bot-tunnel.env, pas figé ici.
+ExecStart=/usr/bin/ssh -N \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=accept-new \
+    -o BatchMode=yes \
+    -i ${SSH_KEY} \
+    -L 6666:localhost:6666 \
+    -p ${POD_PORT} ${POD_USER}@${POD_HOST}
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

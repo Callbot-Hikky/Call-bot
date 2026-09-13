@@ -44,6 +44,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from hikky.adapters.telephony.asterisk_audiosocket_server import (
     AudioSocketServerConfig,
     AudioSocketServerDeps,
+)
+from hikky.adapters.telephony.asterisk_audiosocket_server import (
     start_server as start_audiosocket_server,
 )
 from hikky.domain.outcomes import CallOutcome
@@ -128,7 +130,9 @@ def create_app(
                 restaurant_context_port=deps.restaurant_context_port,
                 stt_adapter=deps.stt_adapter,
                 tts_adapter=deps.tts_adapter,
+                slot_extractor=deps.slot_extractor,
             )
+            audiosocket_config.tts_sample_rate = deps.tts_sample_rate
             server, _adapter = await start_audiosocket_server(
                 audiosocket_deps, audiosocket_config
             )

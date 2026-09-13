@@ -29,7 +29,6 @@ slots quand ils veulent simuler une extraction.
 """
 
 import logging
-from typing import Any
 
 from pipecat.frames.frames import (
     EndFrame,
@@ -43,8 +42,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from hikky.domain.call_session import CallSession
-from hikky.domain.outcomes import CallOutcome
-from hikky.observability.latency import measure_latency
+from hikky.domain.turn_runner import NoOpSlotExtractor, SlotExtractor, run_turn
 
 logger = logging.getLogger("hikky.dialogue")
 
@@ -114,54 +112,20 @@ class DialogueProcessor(FrameProcessor):
         if self._closed:
             return
 
-        async with measure_latency("slot_extraction"):
-            slot_updates = await self._slot_extractor.extract(user_text)
-        async with measure_latency("dialogue_engine"):
-            result = await self._session.process_user_turn(user_text, slot_updates)
-
-        fallback = self._session.check_fallback(
-            user_requested_human=False,  # détection texte → futur travail
-            group_size=slot_updates.get("party_size"),
+        decision = await run_turn(
+            session=self._session,
+            slot_extractor=self._slot_extractor,
+            user_text=user_text,
+            customer_phone=self._customer_phone,
+            speak=self._emit_speech,
         )
-        if fallback is not None:
-            logger.info(
-                "fallback triggered",
-                extra={"outcome": str(fallback.outcome), "reason": fallback.reason},
-            )
-            if (
-                fallback.outcome == CallOutcome.CALLBACK_REQUESTED
-                and self._customer_phone is not None
-            ):
-                await self._session.request_callback(
-                    customer_phone=self._customer_phone,
-                    preferred_slot=None,
-                    note=fallback.reason,
-                )
-            await self._emit_speech(self._session.context.fallback_message)
-            await self._session.end_with(fallback.outcome)
+        if decision.should_end:
             await self.push_frame(EndFrame())
             self._closed = True
-            return
-
-        outcome = await self._session.finalize_if_complete(self._customer_phone)
-        if outcome is not None:
-            logger.info("call finalized", extra={"outcome": str(outcome)})
-            await self._emit_speech(result.bot_says)
-            await self.push_frame(EndFrame())
-            self._closed = True
-            return
-
-        # Tour normal : on émet la réponse du LLM
-        await self._emit_speech(result.bot_says)
 
 
-class SlotExtractor:
-    """Interface async : extrait des slots structurés d'un tour de parole."""
+# Réexportés pour compatibilité : `SlotExtractor` vit désormais dans le
+# domaine, pour que le chemin AudioSocket puisse l'utiliser sans Pipecat.
+_NoOpSlotExtractor = NoOpSlotExtractor
 
-    async def extract(self, user_text: str) -> dict[str, Any]:  # pragma: no cover
-        raise NotImplementedError
-
-
-class _NoOpSlotExtractor(SlotExtractor):
-    async def extract(self, user_text: str) -> dict[str, Any]:
-        return {}
+__all__ = ["DialogueProcessor", "NoOpSlotExtractor", "SlotExtractor"]

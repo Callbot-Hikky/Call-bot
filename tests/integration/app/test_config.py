@@ -14,7 +14,7 @@ def test_load_from_env_returns_config_when_all_required_set(monkeypatch):
     assert config.llama_model_path == "/models/m.gguf"
     assert config.piper_model_path == "/voices/v.onnx"
     # defaults
-    assert config.whisper_model == "distil-large-v3"
+    assert config.whisper_model == "large-v3"
     assert config.whisper_device == "cuda"
     assert config.llama_n_ctx == 4096
     assert config.tts_sample_rate == 22050
