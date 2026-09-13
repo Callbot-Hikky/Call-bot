@@ -47,7 +47,7 @@ def load_from_env() -> AppConfig:
     return AppConfig(
         back_base_url=_req("HIKKY_BACK_BASE_URL"),
         back_api_key=_req("HIKKY_BACK_API_KEY"),
-        whisper_model=_opt("HIKKY_WHISPER_MODEL", "distil-large-v3"),
+        whisper_model=_opt("HIKKY_WHISPER_MODEL", "large-v3"),
         whisper_device=_opt("HIKKY_WHISPER_DEVICE", "cuda"),
         whisper_compute_type=_opt("HIKKY_WHISPER_COMPUTE_TYPE", "int8"),
         llama_model_path=_req("HIKKY_LLAMA_MODEL_PATH"),

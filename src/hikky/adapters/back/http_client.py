@@ -31,11 +31,19 @@ class BackHttpClient:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._headers = {"Authorization": f"Bearer {api_key}"}
+        # Le backend Spring authentifie les appels machine par `X-Api-Key`
+        # (cf. ServiceApiKeyFilter). On conserve `Authorization` pour les
+        # déploiements qui attendent encore un jeton porteur.
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "X-Api-Key": api_key,
+        }
         self._client = client or httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
 
-    async def get(self, path: str) -> dict[str, Any]:
-        return await self._request("GET", path)
+    async def get(
+        self, path: str, *, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self._request("GET", path, params=params)
 
     async def post(
         self,
@@ -53,6 +61,7 @@ class BackHttpClient:
         *,
         json: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         merged_headers = (
@@ -62,7 +71,7 @@ class BackHttpClient:
         for attempt in range(2):  # 1 try + 1 retry
             try:
                 response = await self._client.request(
-                    method, url, json=json, headers=merged_headers
+                    method, url, json=json, headers=merged_headers, params=params
                 )
             except httpx.HTTPError as exc:
                 last_error = exc

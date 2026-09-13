@@ -140,7 +140,7 @@ async def test_finalize_on_complete_intent_emits_confirmation_and_end():
         }
     )
     session, reservation, _, notif = _make_session(
-        llm_replies=["Pour qui ?", "Confirmé."]
+        llm_replies=["Pour qui ?", "Confirmé.", "Merci !"]
     )
     reservation.set_availability("r-1", available=True)
     processor = DialogueProcessor(
@@ -160,10 +160,19 @@ async def test_finalize_on_complete_intent_emits_confirmation_and_end():
         FrameDirection.DOWNSTREAM,
     )
 
+    # Slots complets => recapitulatif, PAS de reservation ni de raccrochage.
     text_frames = [f.text for f, _d in captured if isinstance(f, TextFrame)]
-    assert "Confirmé." in text_frames
-    assert any(isinstance(f, EndFrame) for f, _d in captured)
+    assert any("récapitule" in t for t in text_frames), text_frames
+    assert not any(isinstance(f, EndFrame) for f, _d in captured)
+    assert len(reservation.reservations) == 0, "reserver sans accord du client"
+
+    # L'accord explicite declenche la reservation et cloture l'appel.
+    await processor._handle(
+        TranscriptionFrame(text="oui c'est ça", user_id="x", timestamp="t", finalized=True),
+        FrameDirection.DOWNSTREAM,
+    )
     assert len(reservation.reservations) == 1
+    assert any(isinstance(f, EndFrame) for f, _d in captured)
     assert notif.sent
 
 

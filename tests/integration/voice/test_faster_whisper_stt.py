@@ -143,3 +143,39 @@ async def test_transcribe_does_not_block_event_loop(
     # Si transcribe bloquait l'event loop, `tick` ne serait jamais appelé
     # plus de 1 fois. Avec to_thread, il doit avancer en parallèle.
     assert len(progress) >= 3
+
+
+# ── Contexte lexical ────────────────────────────────────────────────────
+#
+# Appel simule : « Au nom de Rian » transcrit « Au nom de rien ». Le
+# 8 kHz telephonique abime les fins de mots, et Whisper choisit le mot
+# courant plutot que le prenom. Un prompt de contexte oriente le decodage
+# vers le vocabulaire du domaine.
+
+async def test_domain_prompt_is_passed_to_whisper(fake_whisper_module):
+    _, model = fake_whisper_module
+    adapter = FasterWhisperSTTAdapter()
+
+    async def _chunks():
+        yield b"\x00" * 320
+
+    stream = await adapter.transcribe(_chunks())
+    [t async for t in stream]
+
+    kwargs = model.transcribe.call_args.kwargs
+    prompt = kwargs.get("initial_prompt") or ""
+    assert "réservation" in prompt.lower()
+    assert "table" in prompt.lower()
+
+
+async def test_domain_prompt_can_be_overridden(fake_whisper_module):
+    _, model = fake_whisper_module
+    adapter = FasterWhisperSTTAdapter(initial_prompt="vocabulaire maison")
+
+    async def _chunks():
+        yield b"\x00" * 320
+
+    stream = await adapter.transcribe(_chunks())
+    [t async for t in stream]
+
+    assert model.transcribe.call_args.kwargs["initial_prompt"] == "vocabulaire maison"

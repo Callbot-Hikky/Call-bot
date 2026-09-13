@@ -30,7 +30,6 @@ from hikky.adapters.telephony.audiosocket_protocol import (
     read_packet,
 )
 
-
 # ── Décodage ────────────────────────────────────────────────────────────────
 
 

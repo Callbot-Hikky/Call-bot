@@ -68,6 +68,24 @@ class AsteriskAudioSocketAdapter(TelephonyPort):
             writer.write(packet)
             await writer.drain()
 
+    async def send_audio_frames(self, call_id: str, frames: list[bytes]) -> None:
+        """Envoie plusieurs trames de 20 ms avec un seul `drain`.
+
+        Asterisk attend des trames de 20 ms : un paquet plus gros casse la
+        lecture. Mais attendre le réseau après chacune coûte ~100 ms à
+        travers un tunnel distant, soit 28 s pour 4 s de parole. On empile
+        donc les écritures dans le tampon du socket et on ne cède la main
+        qu'une fois par lot.
+        """
+        writer = self._connections.get(call_id)
+        lock = self._locks.get(call_id)
+        if writer is None or lock is None:
+            raise TelephonyError(f"No active AudioSocket stream for call_id={call_id}")
+        async with lock:
+            for frame in frames:
+                writer.write(encode_audio(frame))
+            await writer.drain()
+
     async def transfer(self, call_id: str, destination_number: str) -> None:
         # Le protocole AudioSocket ne gère PAS le transfert d'appel — il
         # n'y a pas d'action de contrôle "transfer" dans le protocole. Un

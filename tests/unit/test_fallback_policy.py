@@ -85,3 +85,53 @@ def test_no_trigger_returns_none():
         )
         is None
     )
+
+
+def test_clarification_request_is_not_counted_as_stalling():
+    """« Tu peux repeter ? » signale un bot defaillant, pas un client bloque.
+
+    En appel reel, cette phrase a ete comptee comme un tour sans progres
+    et a contribue a raccrocher au nez d'un client qui cooperait.
+    """
+    from hikky.domain.fallback_policy import is_clarification_request
+
+    for phrase in [
+        "Hein ? T'as dit quoi ? Tu peux répéter ?",
+        "pardon ?",
+        "je n'ai pas compris",
+        "comment ?",
+        "vous pouvez répéter s'il vous plaît",
+    ]:
+        assert is_clarification_request(phrase) is True, phrase
+
+
+def test_normal_answers_are_not_clarification_requests():
+    from hikky.domain.fallback_policy import is_clarification_request
+
+    for phrase in ["demain matin", "pour quatre personnes", "au nom de Dupont", "oui"]:
+        assert is_clarification_request(phrase) is False, phrase
+
+
+def test_contesting_a_recorded_fact_is_not_stalling():
+    """« Je t'ai jamais dit que je m'appelais X » signale une erreur du bot.
+
+    Appel reel : le client a conteste trois fois un nom mal transcrit,
+    et le repli l'a raccroche au nez pendant qu'il tentait de corriger.
+    """
+    from hikky.domain.fallback_policy import is_correction
+
+    for phrase in [
+        "Je t'ai jamais dit que je m'appelais Monsieur Medica",
+        "Et qui est M. Medica ?",
+        "ce n'est pas mon nom",
+        "j'ai jamais dit ça",
+        "non c'est faux",
+    ]:
+        assert is_correction(phrase) is True, phrase
+
+
+def test_plain_answers_are_not_corrections():
+    from hikky.domain.fallback_policy import is_correction
+
+    for phrase in ["demain matin", "pour quatre personnes", "oui", "Dupont"]:
+        assert is_correction(phrase) is False, phrase
