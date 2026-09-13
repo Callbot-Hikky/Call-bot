@@ -27,11 +27,14 @@ sans ces librairies installées.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 from hikky.exceptions import STTTimeout
 from hikky.ports.speech_recognition import SpeechRecognitionPort
+
+logger = logging.getLogger("hikky.stt")
 
 # À chaud la transcription prend ~0,3 s ; le premier appel inclut le
 # chargement du modèle (~2,4 s). 3 s était trop juste et faisait lever
@@ -45,9 +48,9 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 # Orienter le décodage vers le vocabulaire du domaine réduit nettement ces
 # confusions, surtout sur les noms propres et les horaires.
 DOMAIN_PROMPT = (
-    "Réservation de table au restaurant. Le client indique le jour, "
-    "l'heure, le nombre de personnes et son nom de famille. Vocabulaire : "
-    "réserver, réservation, table, couverts, personnes, midi, soir, "
+    "Réservation de table au restaurant. Nombre de personnes : "
+    "une personne, deux, trois, quatre, cinq, six, sept, huit personnes. "
+    "Vocabulaire : réserver, réservation, table, couverts, midi, soir, "
     "demain, ce soir, heures, et demie, au nom de, monsieur, madame."
 )
 
@@ -123,8 +126,19 @@ class FasterWhisperSTTAdapter(SpeechRecognitionPort):
                     model.transcribe,
                     audio,
                     language=self._language,
-                    beam_size=1,
+                    # beam_size 5 : explore plusieurs hypothèses au lieu du seul
+                    # mot le plus probable. Corrige les confusions de mots courts
+                    # en téléphonie (« quatre » entendu « cette »), pour un coût
+                    # de latence négligeable sur des clips de 1–3 s sur GPU.
+                    beam_size=5,
+                    temperature=0.0,
                     initial_prompt=self._initial_prompt,
+                    # Le prompt de domaine ne doit pas « fuiter » dans la sortie
+                    # (Whisper recrachait le prompt sur les clips quasi vides).
+                    condition_on_previous_text=False,
+                    # Rejette les segments sans parole (silences → hallucinations).
+                    no_speech_threshold=0.6,
+                    log_prob_threshold=-1.0,
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -135,6 +149,42 @@ class FasterWhisperSTTAdapter(SpeechRecognitionPort):
 
         async def _stream() -> AsyncIterator[str]:
             for segment in segments:
+                if _is_hallucination(segment.text):
+                    logger.info("segment STT ignoré (hallucination): %r", segment.text)
+                    continue
                 yield segment.text
 
         return _stream()
+
+
+# Whisper « meuble » les silences et les bruits avec des phrases apprises sur
+# ses données (génériques de sous-titres, remerciements YouTube…). En
+# téléphonie c'est fréquent, et ces bribes polluaient la conversation (le bot
+# répondait sérieusement à « Sous-titrage MFP »). On les jette avant qu'elles
+# n'atteignent le cerveau.
+_HALLUCINATION_MARKERS = (
+    "sous-titrage",
+    "sous-titres",
+    "soustitreur",
+    "amara.org",
+    "mfp",
+    "radio-canada",
+    "st' 501",
+    "st'501",
+    "générique",
+    "merci d'avoir regardé",
+    "abonnez-vous",
+    "n'oubliez pas de vous abonner",
+    "par soustitreur",
+    "❤",
+    # Échos de notre propre prompt de domaine (Whisper le recrachait parfois).
+    "le client indique le jour",
+    "réservation de table au restaurant. nombre de personnes",
+)
+
+
+def _is_hallucination(text: str) -> bool:
+    normalise = (text or "").strip().lower()
+    if not normalise:
+        return True
+    return any(marker in normalise for marker in _HALLUCINATION_MARKERS)

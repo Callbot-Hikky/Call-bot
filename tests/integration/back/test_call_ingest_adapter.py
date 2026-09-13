@@ -305,3 +305,36 @@ async def test_ingest_body_carries_all_tables_for_a_split_group(
     body = json.loads(post.read())
     assert body["reservation"]["tableId"] == "tbl-8"
     assert body["reservation"]["tableIds"] == ["tbl-8", "tbl-4"]
+
+
+async def test_deux_appels_anonymes_ne_partagent_pas_le_client(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """Sans numéro appelant, chaque appel doit rester un client distinct
+    (sinon renommer réécrit le nom de toutes les réservations passées)."""
+    import json
+
+    from hikky.observability.logging import clear_call_context, set_call_context
+
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST",
+        json={"reservation": {"id": "res"}}, is_reusable=True,
+    )
+    phones = []
+    for call_id in ("appel-A", "appel-B"):
+        set_call_context(call_id=call_id)
+        try:
+            await adapter.create(
+                "r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None
+            )
+        finally:
+            clear_call_context()
+    for req in httpx_mock.get_requests():
+        if req.method == "POST":
+            phones.append(json.loads(req.read())["customer"]["phone"])
+    assert phones[0] != phones[1]  # deux clients distincts

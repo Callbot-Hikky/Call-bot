@@ -18,6 +18,15 @@ from hikky.ports.notification import NotificationPort
 from hikky.ports.reservation import ReservationPort
 
 
+@dataclass(frozen=True)
+class _DispoSimple:
+    """Détail de dispo minimal quand le port n'expose que le booléen."""
+
+    available: bool
+    reason: str | None = None
+    alternatives: list = field(default_factory=list)
+
+
 @dataclass(slots=True)
 class _SessionState:
     intent: ReservationIntent = field(default_factory=ReservationIntent)
@@ -27,6 +36,9 @@ class _SessionState:
     ended: bool = False
     last_availability_check: bool | None = None
     last_within_opening_hours: bool | None = None
+    # Créneau (date_time, party_size) déjà confirmé disponible, pour éviter de
+    # re-checker à chaque tour une fois la vérification faite.
+    availability_ok_sig: tuple[datetime, int] | None = None
 
 
 class CallSession:
@@ -178,12 +190,37 @@ class CallSession:
         if (name := slots.get("customer_name")) is not None:
             intent = intent.with_customer_name(str(name))
         self._state.intent = intent
+        # Toute évolution des slots invalide une dispo confirmée auparavant.
+        self._state.availability_ok_sig = None
 
     def clear_slots(self, names: list[str]) -> None:
         intent = self._state.intent
         for name in names:
             intent = intent.without(name)
         self._state.intent = intent
+        self._state.availability_ok_sig = None
+
+    async def availability_detail(
+        self, when: datetime, party_size: int
+    ) -> Any:
+        """Détail de disponibilité (available / reason / alternatives).
+
+        Utilise la route dédiée de l'adaptateur si elle existe, sinon retombe
+        sur le booléen `check_availability`.
+        """
+        detail_fn = getattr(self._reservation, "availability_detail", None)
+        if detail_fn is not None:
+            detail = await detail_fn(self.context.id, when, party_size)
+            self._state.last_availability_check = getattr(detail, "available", None)
+            return detail
+        available = await self.check_availability(when, party_size)
+        return _DispoSimple(available=available)
+
+    def mark_availability_ok(self, when: datetime, party_size: int) -> None:
+        self._state.availability_ok_sig = (when, party_size)
+
+    def availability_confirmed_for(self, when: datetime, party_size: int) -> bool:
+        return self._state.availability_ok_sig == (when, party_size)
 
     async def check_availability(self, when: datetime, party_size: int) -> bool:
         available = await self._reservation.check_availability(
