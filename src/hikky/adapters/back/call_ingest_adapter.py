@@ -171,15 +171,19 @@ class CallIngestAdapter(ReservationPort):
         if verdict.table_id is None:
             logger.warning("aucune table assignée — réservation sans place attribuée")
 
+        call_ref = get_call_context().get("call_id") or f"hikky-{date_time.isoformat()}"
+        # Numéro appelant inconnu (softphone sans présentation du numéro) : on
+        # ne le fusionne PAS avec les autres appels anonymes. Le backend
+        # rattache les clients par numéro ; un « inconnu » partagé ferait que
+        # renommer à un appel réécrit le nom de TOUTES les réservations
+        # précédentes de ce faux client. On rend donc l'anonyme unique par appel.
+        phone = customer_phone or f"{UNKNOWN_PHONE}-{call_ref}"
         body = {
-            "twilioCallSid": (
-                get_call_context().get("call_id")
-                or f"hikky-{date_time.isoformat()}"
-            ),
+            "twilioCallSid": call_ref,
             "restaurantPhone": self._restaurant_phone,
             "fromNumber": customer_phone,
             "customer": {
-                "phone": customer_phone or UNKNOWN_PHONE,
+                "phone": phone,
                 "lastName": customer_name,
             },
             "reservation": {

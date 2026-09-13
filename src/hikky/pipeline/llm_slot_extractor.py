@@ -124,7 +124,7 @@ class LLMSlotExtractor(SlotExtractor):
             logger.warning("LLM slot extraction call failed", exc_info=True)
             return {}
 
-        return self._parse(raw, now)
+        return _drop_invented_time(self._parse(raw, now), user_text)
 
     def _parse(self, raw: str, now: datetime | None = None) -> dict[str, Any]:
         today = (now or self._clock()).date()
@@ -175,6 +175,37 @@ class LLMSlotExtractor(SlotExtractor):
             out["customer_name"] = name_raw.strip()
 
         return out
+
+
+# Moments de journée VAGUES : ils indiquent une période, pas une heure. Le
+# modèle infère parfois une heure précise (« ce soir » → 18:00) malgré la
+# consigne ; on retire alors l'heure de façon déterministe.
+_VAGUE_PERIOD = re.compile(
+    r"\b(ce soir|cette soir[ée]+|en soir[ée]+|dans la soir[ée]+|"
+    r"ce matin|dans la matin[ée]+|cet? apr[eè]s[- ]?midi|"
+    r"dans l'apr[eè]s[- ]?midi|en journ[ée]+|dans la journ[ée]+|tant[ôo]t)\b",
+    re.IGNORECASE,
+)
+# Une heure réellement énoncée : un chiffre, ou « midi »/« minuit » (qui SONT
+# des heures valides et doivent, eux, être conservés).
+_EXPLICIT_HOUR = re.compile(r"\d|\bmidi\b|\bminuit\b", re.IGNORECASE)
+
+
+def _drop_invented_time(slots: dict[str, Any], user_text: str) -> dict[str, Any]:
+    """Retire l'heure quand la phrase ne contient qu'un moment vague.
+
+    « ce soir », « dans l'après-midi »… ne sont pas des heures : c'est à
+    l'assistant de demander l'heure exacte, pas au modèle de la deviner. Si
+    la phrase donne une vraie heure (chiffre, « midi », « minuit »), on garde.
+    """
+    texte = user_text or ""
+    if (
+        "time" in slots
+        and _VAGUE_PERIOD.search(texte)
+        and not _EXPLICIT_HOUR.search(texte)
+    ):
+        return {clef: valeur for clef, valeur in slots.items() if clef != "time"}
+    return slots
 
 
 # Fenêtre de réservation plausible. Au-delà, la valeur est jetée plutôt

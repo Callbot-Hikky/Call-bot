@@ -91,6 +91,109 @@ def _refus_si_groupe_trop_grand(session: Any) -> str | None:
     )
 
 
+_CRENEAUX_MARKERS = (
+    "disponib",
+    "créneau",
+    "creneau",
+    "quelles heures",
+    "quels horaires",
+    "heures libres",
+    "heure libre",
+    "de la place",
+    "des places",
+    "vous avez de la place",
+)
+
+
+def _demande_de_creneaux(user_text: str) -> bool:
+    """Vrai si le client demande nos créneaux / heures disponibles."""
+    texte = (user_text or "").lower()
+    return any(marker in texte for marker in _CRENEAUX_MARKERS)
+
+
+def _jour_fr(jour: Any) -> str:
+    return f"le {_JOURS[jour.weekday()]} {jour.day} {_MOIS[jour.month - 1]}"
+
+
+def _lister_creneaux(session: Any) -> str:
+    """Énumère les plages d'ouverture pour le jour demandé (déterministe)."""
+    context = getattr(session, "context", None)
+    intent = getattr(session, "intent", None)
+    jour = getattr(intent, "date", None) if intent is not None else None
+    horaires = list(getattr(context, "opening_hours", None) or [])
+    if jour is None:
+        return "Bien sûr. Pour quel jour souhaitez-vous connaître nos disponibilités ?"
+    plages = sorted(
+        (oh for oh in horaires if oh.weekday == jour.weekday()),
+        key=lambda oh: oh.opens,
+    )
+    if not plages:
+        return (
+            f"Je suis désolé, nous sommes fermés {_jour_fr(jour)}. "
+            "Souhaitez-vous choisir un autre jour ?"
+        )
+    texte = " et ".join(
+        f"de {_heure_fr(oh.opens)} à {_heure_fr(oh.closes)}" for oh in plages
+    )
+    return (
+        f"{_jour_fr(jour).capitalize()}, nous vous accueillons {texte}. "
+        "À quelle heure souhaitez-vous venir ?"
+    )
+
+
+async def _verifier_dispo_avant_nom(
+    session: Any,
+    history: list[dict[str, str]],
+    speak: Callable[[str], Awaitable[None]],
+    user_text: str,
+) -> TurnOutcome | None:
+    """Vérifie la dispo du créneau avant de demander le nom.
+
+    Renvoie un TurnOutcome (message d'indisponibilité + heure effacée) si le
+    créneau n'est pas réservable, sinon None pour laisser le flux demander le
+    nom. Sur une session basique (sans support de dispo détaillée), on
+    n'intervient pas.
+    """
+    detail_fn = getattr(session, "availability_detail", None)
+    confirmed_fn = getattr(session, "availability_confirmed_for", None)
+    mark_fn = getattr(session, "mark_availability_ok", None)
+    if detail_fn is None or confirmed_fn is None or mark_fn is None:
+        return None
+
+    intent = session.intent
+    quand = getattr(intent, "date_time", None)
+    couverts = getattr(intent, "party_size", None)
+    if quand is None or couverts is None:
+        return None
+    if confirmed_fn(quand, couverts):
+        return None
+
+    detail = await detail_fn(quand, couverts)
+    if getattr(detail, "available", False):
+        mark_fn(quand, couverts)
+        return None
+
+    raison = getattr(detail, "reason", None)
+    alternatives = getattr(detail, "alternatives", None) or []
+    if raison == "closed":
+        reply = (
+            "Je suis désolé, nous sommes fermés à cette heure-là. "
+            "Souhaitez-vous choisir une autre heure ?"
+        )
+    else:
+        reply = "Je suis désolé, nous sommes complets à cette heure-là."
+        if alternatives:
+            heures = ", ".join(_heure_fr(a) for a in alternatives[:3])
+            reply += f" Nous aurions de la place à {heures}."
+        reply += " Souhaitez-vous une autre heure ?"
+
+    session.clear_slots(["time"])
+    logger.info("créneau indisponible avant collecte du nom — nouvelle heure demandée")
+    await _remember(history, user_text, reply)
+    await speak(reply)
+    return TurnOutcome(should_end=False, slots={})
+
+
 async def run_routed_turn(
     *,
     session: Any,
@@ -126,6 +229,24 @@ async def run_routed_turn(
     # 2. Décider — sans LLM : l'état suffit.
     decision = route_turn(session.intent, user_text, awaiting_confirmation)
     conversation.info("  route   : %s", decision.action.value)
+
+    # Le client demande nos créneaux / heures disponibles → réponse
+    # déterministe (au lieu de laisser le modèle broder et tourner en rond).
+    if decision.action is Action.ANSWER_QUESTION and _demande_de_creneaux(user_text):
+        reply = _lister_creneaux(session)
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(
+            should_end=False, awaiting_confirmation=awaiting_confirmation, slots=slots
+        )
+
+    # Avant de demander le NOM (dernier slot), vérifier la disponibilité du
+    # créneau : inutile de collecter le nom si c'est fermé ou complet — on
+    # propose plutôt une autre heure tout de suite.
+    if decision.action is Action.ASK_SLOT and decision.slot == "customer_name":
+        indispo = await _verifier_dispo_avant_nom(session, history, speak, user_text)
+        if indispo is not None:
+            return indispo
 
     # 3. Agir.
     if decision.action is Action.ANSWER_QUESTION:
@@ -163,7 +284,8 @@ async def run_routed_turn(
             f"C'est noté, {intent.customer_name}. "
             f"Nous vous attendons {_JOURS[intent.date.weekday()]} "
             f"{intent.date.day} {_MOIS[intent.date.month - 1]} "
-            f"à {_heure_fr(intent.time)}. Bonne journée !"
+            f"à {_heure_fr(intent.time)}. "
+            "Vous allez recevoir un SMS de confirmation. Bonne journée !"
         )
         await _remember(history, user_text, reply)
         await speak(reply)
