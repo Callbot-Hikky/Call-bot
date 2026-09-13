@@ -34,6 +34,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hikky.observability.logging import clear_call_context, set_call_context
+
 from hikky.adapters.telephony.asterisk_audiosocket_adapter import (
     AsteriskAudioSocketAdapter,
 )
@@ -183,6 +185,11 @@ async def handle_connection(
             return
         call_id = str(first.call_uuid)
         adapter.bind_call(call_id, writer)
+        # Propager le call_id dans le contexte : il sert de clé d'idempotence
+        # (twilioCallSid) à l'ingestion. Sans ça, deux réservations au même
+        # créneau retombaient sur une clé date+heure identique et la seconde
+        # était considérée comme un doublon — donc jamais créée.
+        set_call_context(call_id=call_id)
         logger.info("call bound", extra={"call_id": call_id})
 
         # 2. Charger le contexte restaurant
@@ -226,6 +233,7 @@ async def handle_connection(
         except Exception:  # noqa: BLE001
             pass
         logger.info("audiosocket connection closed", extra={"call_id": call_id})
+        clear_call_context()
 
 
 async def _run_smoke_test(reader: asyncio.StreamReader, duration_s: float) -> None:
