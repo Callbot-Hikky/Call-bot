@@ -240,10 +240,13 @@ async def run_routed_turn(
             should_end=False, awaiting_confirmation=awaiting_confirmation, slots=slots
         )
 
-    # Avant de demander le NOM (dernier slot), vérifier la disponibilité du
-    # créneau : inutile de collecter le nom si c'est fermé ou complet — on
-    # propose plutôt une autre heure tout de suite.
-    if decision.action is Action.ASK_SLOT and decision.slot == "customer_name":
+    # Dès que jour + heure + nombre sont connus, vérifier la disponibilité —
+    # AVANT de demander le nom ET avant de récapituler. Sinon, si le client a
+    # donné son nom tôt, l'indisponibilité n'était annoncée qu'au tout dernier
+    # moment (au moment de réserver). On propose une autre heure tout de suite.
+    if decision.action is Action.CONFIRM or (
+        decision.action is Action.ASK_SLOT and decision.slot == "customer_name"
+    ):
         indispo = await _verifier_dispo_avant_nom(session, history, speak, user_text)
         if indispo is not None:
             return indispo

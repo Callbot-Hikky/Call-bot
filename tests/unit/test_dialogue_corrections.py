@@ -221,3 +221,18 @@ async def test_dispo_ok_laisse_demander_le_nom():
     # Créneau libre → on ne vide pas l'heure, on demande le nom.
     assert "time" not in session.cleared
     assert dits and ("nom" in dits[-1].lower())
+
+
+async def test_indispo_annoncee_avant_le_recap_meme_si_nom_deja_donne():
+    """Nom donné tôt → tous les slots sont là → route CONFIRM. La dispo doit
+    être vérifiée AVANT le récapitulatif, pas seulement au moment de réserver."""
+    session = _SessionDispo(_Dispo(available=False, reason="no_table"))
+    session.apply_slots({"customer_name": "Ayoub"})  # nom déjà présent → CONFIRM
+    dits: list[str] = []
+    outcome = await _run(session, "oui c'est ça", dits)
+    assert session.booked == 0
+    assert "time" in session.cleared
+    assert dits and "complet" in dits[-1].lower()
+    # Surtout : le message n'est PAS un récapitulatif.
+    assert "récapitule" not in dits[-1].lower()
+    assert outcome.should_end is False
