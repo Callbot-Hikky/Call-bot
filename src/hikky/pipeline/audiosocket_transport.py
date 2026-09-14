@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
+import time
 from typing import Any
 from uuid import UUID
 
@@ -40,6 +41,13 @@ _HANGUP, _UUID, _DTMF, _AUDIO, _ERREUR = 0x00, 0x01, 0x03, 0x10, 0xFF
 
 # 20 ms à 8 kHz en 16 bits mono. Asterisk n'en accepte pas d'autre.
 TRAME_20MS_OCTETS = 320
+TRAME_20MS_SECONDES = 0.020
+
+# Au-dela de ce retard, on considere qu'il y a eu un silence (ou une
+# interruption) et on repart de l'instant present. Sans ce garde-fou, le
+# transport « rattraperait » son retard en rafale a la reprise de parole,
+# ce qui est precisement ce que le cadencement cherche a eviter.
+DERIVE_MAX_SECONDES = 0.200
 
 
 class AudioSocketTransportParams(TransportParams):
@@ -129,6 +137,8 @@ class AudioSocketOutputTransport(BaseOutputTransport):
         self._writer = writer
         self._verrou = asyncio.Lock()
         self._reste = bytearray()
+        # Instant auquel la prochaine trame doit partir. 0 = flux a l'arret.
+        self._prochaine_echeance = 0.0
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
         """Émet l'audio en trames de 20 ms strictes.
@@ -141,22 +151,46 @@ class AudioSocketOutputTransport(BaseOutputTransport):
         async with self._verrou:
             self._reste.extend(frame.audio)
             paquets = bytearray()
+            trames: list[bytes] = []
             while len(self._reste) >= TRAME_20MS_OCTETS:
                 trame = bytes(self._reste[:TRAME_20MS_OCTETS])
                 del self._reste[:TRAME_20MS_OCTETS]
-                paquets.extend(struct.pack(">BH", _AUDIO, len(trame)) + trame)
+                trames.append(struct.pack(">BH", _AUDIO, len(trame)) + trame)
 
-            if not paquets and self._reste:
+            if not trames and self._reste:
                 # Fin de parole : on complète la dernière trame plutôt que
                 # de la garder indéfiniment en attente.
                 trame = bytes(self._reste).ljust(TRAME_20MS_OCTETS, b"\x00")
                 self._reste.clear()
-                paquets.extend(struct.pack(">BH", _AUDIO, len(trame)) + trame)
+                trames.append(struct.pack(">BH", _AUDIO, len(trame)) + trame)
 
-            if not paquets:
+            if not trames:
                 return True
+
+            # Cadencement temps reel : une trame toutes les 20 ms.
+            #
+            # Le TTS produit la parole bien plus vite que le temps reel. Tout
+            # ecrire d'un bloc faisait expedier a Asterisk des centaines de
+            # paquets RTP en quelques millisecondes ; le reseau ecretait ces
+            # rafales et 10 % des paquets se perdaient, hachant la voix.
+            #
+            # L'echeance est absolue et monotone, jamais « maintenant + 20 ms » :
+            # cette derniere forme ajoute le delai au temps DEJA ecoule et
+            # accumule le retard de chaque iteration jusqu'a desynchroniser
+            # l'audio de plusieurs centaines de millisecondes sur une phrase.
             try:
-                self._writer.write(bytes(paquets))
+                for paquet in trames:
+                    maintenant = time.monotonic()
+                    if (
+                        self._prochaine_echeance == 0.0
+                        or maintenant - self._prochaine_echeance > DERIVE_MAX_SECONDES
+                    ):
+                        self._prochaine_echeance = maintenant
+                    delai = self._prochaine_echeance - maintenant
+                    if delai > 0:
+                        await asyncio.sleep(delai)
+                    self._writer.write(paquet)
+                    self._prochaine_echeance += TRAME_20MS_SECONDES
                 await self._writer.drain()
             except (ConnectionError, OSError):
                 logger.info("flux coupé pendant la parole")
@@ -173,6 +207,9 @@ class AudioSocketOutputTransport(BaseOutputTransport):
             if self._reste:
                 logger.info("interruption : %d octets abandonnés", len(self._reste))
             self._reste.clear()
+            # Le flux reprendra a l'instant present : sans cette remise a zero,
+            # la reprise de parole rattraperait en rafale le temps de silence.
+            self._prochaine_echeance = 0.0
 
 
 class AudioSocketTransport(BaseTransport):
