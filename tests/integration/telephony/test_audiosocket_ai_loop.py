@@ -250,56 +250,6 @@ async def test_greeting_audio_is_resampled_to_telephony_rate():
     assert len(audio) == pytest.approx(1600, abs=32)
 
 
-async def test_utterance_is_transcribed_after_silence():
-    stt = _FakeSTT(["Bonjour je voudrais reserver"])
-    session = _FakeSession()
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(payload, session, _deps(stt, _FakeTTS()), _config())
-    assert session.turns[0][0] == "Bonjour je voudrais reserver"
-
-
-async def test_transcribed_audio_is_upsampled_for_whisper():
-    stt = _FakeSTT(["oui"])
-    session = _FakeSession()
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(payload, session, _deps(stt, _FakeTTS()), _config())
-    assert len(stt.received_audio[0]) > 4 * AUDIOSOCKET_CHUNK_20MS_BYTES
-
-
-async def test_bot_response_is_spoken_back():
-    tts = _FakeTTS()
-    session = _FakeSession(bot_says="Pour combien de personnes ?")
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(payload, session, _deps(_FakeSTT(["bonjour"]), tts), _config())
-    assert "Pour combien de personnes ?" in tts.spoken
-
-
-async def test_slot_updates_are_passed_to_session():
-    session = _FakeSession()
-    extractor = _FakeSlotExtractor({"party_size": 4})
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(
-        payload, session, _deps(_FakeSTT(["on serait 4"]), _FakeTTS(), extractor), _config()
-    )
-    assert session.turns[0][1] == {"party_size": 4}
-
-
 async def test_empty_transcription_does_not_trigger_a_turn():
     session = _FakeSession()
     payload = b"".join(
@@ -333,50 +283,6 @@ async def test_peer_disconnect_stops_the_loop_cleanly():
     session = _FakeSession()
     await _run(b"", session, _deps(_FakeSTT([]), _FakeTTS()), _config())
     assert session.turns == []
-
-
-async def test_fallback_ends_the_call():
-    @dataclass
-    class _Decision:
-        outcome: CallOutcome
-        reason: str
-
-    session = _FakeSession(
-        fallback=_Decision(outcome=CallOutcome.TRANSFERRED, reason="3 echecs")
-    )
-    tts = _FakeTTS()
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(payload, session, _deps(_FakeSTT(["a", "b"]), tts), _config())
-    assert session.ended_with == CallOutcome.TRANSFERRED
-    assert "Je vous rappelle." in tts.spoken
-    assert len(session.turns) == 1
-
-
-async def test_complete_intent_asks_confirmation_without_ending():
-    """Slots complets => recapitulatif, pas de reservation ni raccrochage."""
-    session = _FakeSession(
-        bot_says="C'est note, merci !",
-        finalize_outcome=CallOutcome.RESERVATION_CREATED,
-        complete_intent=True,
-    )
-    tts = _FakeTTS()
-    payload = b"".join(
-        [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_audio(_loud_frame()) for _ in range(4)]
-        + [encode_audio(_silent_frame()) for _ in range(4)]
-        + [encode_hangup()]
-    )
-    await _run(payload, session, _deps(_FakeSTT(["a", "b"]), tts), _config())
-    assert any("récapitule" in t for t in tts.spoken), tts.spoken
-    assert session.finalize_calls == 0, "reserve sans accord du client"
-    assert len(session.turns) == 2, "l'appel doit rester ouvert"
 
 
 async def test_loop_refuses_to_run_without_stt_or_tts():

@@ -16,7 +16,7 @@ from hikky.domain.routed_turn import (
     _lister_creneaux,
     run_routed_turn,
 )
-from hikky.pipeline.llm_slot_extractor import _drop_invented_time
+from hikky.pipeline.llm_slot_extractor import _drop_invented_time, _resolve_weekday_date
 
 
 # ── #1 : ne pas inventer l'heure depuis un moment vague ──────────────────
@@ -41,6 +41,41 @@ def test_heure_explicite_sans_moment_vague_conservee():
     assert out == {"time": time(20, 0)}
 
 
+# ── #1bis : résolution déterministe des jours de la semaine ──────────────
+#
+# Constaté en réel : un lundi (2026-09-14), « jeudi » a été résolu par le LLM
+# en 2026-09-18 (un vendredi) au lieu du 17. Les modèles calculent mal les
+# dates ; on résout le jour nommé de façon déterministe, en code.
+
+from datetime import datetime
+
+
+def _lundi():
+    return datetime(2026, 9, 14, 10, 0)  # lundi
+
+
+def test_jeudi_donne_le_bon_jeudi_pas_le_vendredi():
+    out = _resolve_weekday_date({"time": time(20, 0)}, "jeudi à 20h", _lundi())
+    assert out["date"] == date(2026, 9, 17)  # jeudi, pas le 18
+
+
+def test_mercredi_et_vendredi_sont_corrects():
+    assert _resolve_weekday_date({}, "mercredi", _lundi())["date"] == date(2026, 9, 16)
+    assert _resolve_weekday_date({}, "vendredi", _lundi())["date"] == date(2026, 9, 18)
+
+
+def test_sans_jour_nomme_la_date_du_llm_est_conservee():
+    # « demain » n'est pas un jour nommé : on ne touche pas à la date extraite.
+    ext = {"date": date(2026, 9, 15)}
+    assert _resolve_weekday_date(ext, "demain", _lundi()) == ext
+
+
+def test_jour_nomme_corrige_une_date_llm_erronee():
+    # Le LLM a mis le 18 (vendredi) pour « jeudi » : on écrase par le 17.
+    out = _resolve_weekday_date({"date": date(2026, 9, 18)}, "pour jeudi", _lundi())
+    assert out["date"] == date(2026, 9, 17)
+
+
 # ── #2 : filtre anti-hallucination STT ───────────────────────────────────
 
 
@@ -52,6 +87,21 @@ def test_hallucinations_whisper_detectees():
 
 def test_vraie_phrase_non_filtree():
     assert not _is_hallucination("Quatre personnes pour demain midi")
+
+
+def test_boucle_de_repetition_est_filtree():
+    """Sur l'écho de sa propre voix, Whisper boucle : « Bonne nuit. Bonne
+    nuit. Bonne nuit… » ×12. Ces répétitions à très faible diversité sont des
+    hallucinations, pas de la parole — on les jette."""
+    assert _is_hallucination("Bonne nuit. " * 12)
+    assert _is_hallucination("les les les les les les les les")
+
+
+def test_repetition_courte_legitime_non_filtree():
+    """« oui oui », « non non merci » restent de vraies réponses courtes."""
+    assert not _is_hallucination("oui oui")
+    assert not _is_hallucination("non non merci")
+    assert not _is_hallucination("Je voudrais réserver une table pour ce soir")
 
 
 class _Seg:

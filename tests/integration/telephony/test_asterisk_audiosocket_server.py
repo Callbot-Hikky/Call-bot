@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from hikky.adapters.telephony.asterisk_audiosocket_server import (
     AudioSocketServerConfig,
     AudioSocketServerDeps,
+    _action_inactivite,
     handle_connection,
     start_server,
 )
@@ -88,6 +89,45 @@ def _make_deps() -> tuple[AudioSocketServerDeps, list[FakeCallSession]]:
         restaurant_context_port=port,  # type: ignore[arg-type]
     )
     return deps, sessions
+
+
+# ── Relance sur inactivité ──────────────────────────────────────────────────
+#
+# Symptôme réel : après une question du bot, si la réponse du client n'est pas
+# captée (réponse courte écartée, écho nettoyé par le VAD), aucun tour n'est
+# produit et le bot reste muet indéfiniment — « au bout d'un moment je n'entends
+# plus rien ». La boucle doit relancer puis clore, au lieu d'attendre un tour
+# qui ne viendra jamais.
+
+
+def _cfg_inactivite():
+    # relances à 10, 20, 30 ; clôture à 40.
+    return AudioSocketServerConfig(inactivite_relance_s=10, inactivite_max_relances=3)
+
+
+def test_action_inactivite_ne_fait_rien_avant_le_premier_palier():
+    assert _action_inactivite(5.0, relances_faites=0, config=_cfg_inactivite()) == "rien"
+
+
+def test_action_inactivite_relance_a_chaque_palier():
+    cfg = _cfg_inactivite()
+    assert _action_inactivite(10.0, relances_faites=0, config=cfg) == "relance"
+    assert _action_inactivite(20.0, relances_faites=1, config=cfg) == "relance"
+    assert _action_inactivite(30.0, relances_faites=2, config=cfg) == "relance"
+
+
+def test_action_inactivite_attend_le_palier_suivant_entre_deux_relances():
+    cfg = _cfg_inactivite()
+    # Déjà relancé une fois : rien tant qu'on n'atteint pas le 2e palier (20 s).
+    assert _action_inactivite(15.0, relances_faites=1, config=cfg) == "rien"
+
+
+def test_action_inactivite_ne_clot_qu_apres_toutes_les_relances():
+    cfg = _cfg_inactivite()
+    # Max de relances atteint mais pas encore le seuil de fin (40 s) → on patiente.
+    assert _action_inactivite(35.0, relances_faites=3, config=cfg) == "rien"
+    # Passé le dernier palier sans réponse → clôture.
+    assert _action_inactivite(40.0, relances_faites=3, config=cfg) == "fin"
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────

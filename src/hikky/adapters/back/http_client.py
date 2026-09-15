@@ -22,6 +22,19 @@ class NotFound(Exception):
     """404 levée par le client, à interpréter par l'adapter."""
 
 
+class Conflict(Exception):
+    """409 levée par le client, à interpréter par l'adapter.
+
+    `code` porte le motif métier renvoyé par le backend (champ `error` du
+    corps JSON), ex. `table_overlap` : la table proposée vient d'être prise.
+    L'adapter s'en sert pour décider s'il réessaie (autre table) ou renonce.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class BackHttpClient:
     def __init__(
         self,
@@ -82,6 +95,16 @@ class BackHttpClient:
 
             if response.status_code == 404:
                 raise NotFound(f"{method} {path}: 404")
+
+            if response.status_code == 409:
+                code = None
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        code = payload.get("error")
+                except (ValueError, TypeError):
+                    pass
+                raise Conflict(f"{method} {path}: 409", code=code)
 
             if 500 <= response.status_code < 600:
                 last_error = BackUnavailable(

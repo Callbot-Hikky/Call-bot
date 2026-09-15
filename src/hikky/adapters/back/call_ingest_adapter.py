@@ -24,6 +24,8 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from hikky.adapters.back.http_client import Conflict
+from hikky.exceptions import ReservationConflict
 from hikky.observability.logging import get_call_context
 from hikky.ports.reservation import ReservationPort
 
@@ -40,6 +42,19 @@ UNKNOWN_PHONE = "inconnu"
 
 # Fuseau du restaurant, tel que renvoyé par /api/calls/context.
 DEFAULT_TIMEZONE = "Europe/Paris"
+
+# Nombre de nouvelles tentatives sur un conflit d'écriture transitoire (course
+# entre `availability`/`ingest`). À chaque retry, on redemande une table libre
+# et on relance ; au-delà, on considère le créneau réellement indisponible.
+_MAX_TABLE_RETRIES = 3
+
+# Codes de 409 dus à une course (pas à un vrai « complet »), donc à réessayer :
+# - table_overlap  : la table proposée vient d'être prise → en redemander une.
+# - duplicate_phone: deux upserts concurrents du même client anonyme → le retry
+#   retrouve le client désormais existant.
+# Le code générique `conflict` n'est PAS rejouable : il recouvre des erreurs non
+# transitoires (ex. « value too long »), qu'un retry ne fait que marteler.
+_RETRYABLE_CONFLICT_CODES = frozenset({"table_overlap", "duplicate_phone"})
 
 
 @dataclass(frozen=True)
@@ -164,39 +179,81 @@ class CallIngestAdapter(ReservationPort):
 
         La table est redemandée juste avant d'enregistrer, et non reprise
         d'une vérification antérieure : entre les deux, le créneau a pu
-        partir. Mieux vaut une réservation sans table qu'une table
-        promise deux fois.
+        partir. Et si la table proposée est prise à l'instant de l'écriture
+        (course entre `availability` et `ingest`), on en redemande une libre
+        et on réessaie — le backend fait confiance au `tableId` fourni et
+        rejette sinon en 409 `table_overlap`, alors que d'autres tables sont
+        libres.
         """
-        verdict = await self.availability_detail(restaurant_id, date_time, party_size)
-        if verdict.table_id is None:
-            logger.warning("aucune table assignée — réservation sans place attribuée")
-
-        call_ref = get_call_context().get("call_id") or f"hikky-{date_time.isoformat()}"
+        # Clé d'idempotence : on préfère `ingest_ref` (unique par appel, minté
+        # à l'ouverture de connexion), sinon `call_id`, sinon un repli daté.
+        ctx = get_call_context()
+        call_ref = (
+            ctx.get("ingest_ref")
+            or ctx.get("call_id")
+            or f"hikky-{date_time.isoformat()}"
+        )
         # Numéro appelant inconnu (softphone sans présentation du numéro) : on
-        # ne le fusionne PAS avec les autres appels anonymes. Le backend
-        # rattache les clients par numéro ; un « inconnu » partagé ferait que
-        # renommer à un appel réécrit le nom de TOUTES les réservations
-        # précédentes de ce faux client. On rend donc l'anonyme unique par appel.
-        phone = customer_phone or f"{UNKNOWN_PHONE}-{call_ref}"
-        body = {
-            "twilioCallSid": call_ref,
-            "restaurantPhone": self._restaurant_phone,
-            "fromNumber": customer_phone,
-            "customer": {
-                "phone": phone,
-                "lastName": customer_name,
-            },
-            "reservation": {
-                "tableId": verdict.table_id,
-                "tableIds": verdict.table_ids,
-                "startsAt": _iso(date_time, self._fuseau),
-                "endsAt": _iso(date_time + self._duration, self._fuseau),
-                "partySize": party_size,
-                "notes": "Réservation prise par l'assistant vocal Hikky",
-            },
-        }
-        payload = await self._client.post("/api/calls/ingest", json=body)
+        # ne le fusionne PAS avec les autres appels anonymes (sinon renommer
+        # réécrirait le nom de toutes les réservations de ce faux client). La
+        # colonne `customers.phone` est un varchar(32) : `inconnu-<ref 32 hex>`
+        # faisait 40 caractères et le backend rejetait CHAQUE réservation
+        # anonyme (« value too long » → 409). On tronque donc à 32 tout en
+        # gardant l'unicité (le suffixe de `call_ref` reste distinctif).
+        phone = customer_phone or f"{UNKNOWN_PHONE}-{call_ref}"[:32]
 
+        payload: dict[str, Any] | None = None
+        for tentative in range(_MAX_TABLE_RETRIES + 1):
+            # Table redemandée à CHAQUE essai : au retry, `availability` exclut
+            # la table qui vient d'être prise et en propose une autre.
+            verdict = await self.availability_detail(
+                restaurant_id, date_time, party_size
+            )
+            if verdict.table_id is None:
+                logger.warning(
+                    "aucune table assignée — réservation sans place attribuée"
+                )
+            body = {
+                "twilioCallSid": call_ref,
+                "restaurantPhone": self._restaurant_phone,
+                "fromNumber": customer_phone,
+                "customer": {
+                    "phone": phone,
+                    "lastName": customer_name,
+                },
+                "reservation": {
+                    "tableId": verdict.table_id,
+                    "tableIds": verdict.table_ids,
+                    "startsAt": _iso(date_time, self._fuseau),
+                    "endsAt": _iso(date_time + self._duration, self._fuseau),
+                    "partySize": party_size,
+                    "notes": "Réservation prise par l'assistant vocal Hikky",
+                },
+            }
+            try:
+                payload = await self._client.post("/api/calls/ingest", json=body)
+                break
+            except Conflict as exc:
+                # Conflit transitoire dû à une course (table prise entre-temps,
+                # upsert client concurrent…) : on redemande une table libre et
+                # on réessaie — il ne doit PAS faire refuser un créneau réservable.
+                if exc.code in _RETRYABLE_CONFLICT_CODES and tentative < _MAX_TABLE_RETRIES:
+                    logger.warning(
+                        "conflit '%s' — nouvelle tentative (%d/%d)",
+                        exc.code, tentative + 1, _MAX_TABLE_RETRIES,
+                    )
+                    continue
+                # Conflit persistant ou non rejouable : vrai refus. On NE
+                # l'annonce PAS comme un succès — on lève une erreur de domaine
+                # que `finalize_if_complete` traduit en « créneau indisponible »,
+                # sans planter l'appel. Le code est journalisé pour diagnostic.
+                logger.warning(
+                    "réservation refusée par le Back (409, code=%s) : %s",
+                    exc.code, exc,
+                )
+                raise ReservationConflict(str(exc)) from exc
+
+        assert payload is not None  # la boucle sort par break ou par raise
         if payload.get("alreadyProcessed"):
             logger.info("appel déjà ingéré — réservation existante renvoyée")
         reservation = payload.get("reservation") or {}
