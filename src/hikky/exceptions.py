@@ -21,5 +21,15 @@ class UnknownRestaurant(HikkyDomainError):
     """Le numéro appelé n'est rattaché à aucun restaurant."""
 
 
+class ReservationConflict(HikkyDomainError):
+    """Le Back refuse la réservation pour conflit (HTTP 409).
+
+    Avec une clé d'idempotence désormais unique par appel, un 409 n'est plus
+    une collision de clé : c'est un vrai conflit métier (créneau qui vient
+    d'être pris, réservation déjà en attente pour ce client…). Le bot doit
+    l'annoncer honnêtement, PAS le présenter comme un succès.
+    """
+
+
 class TelephonyError(HikkyDomainError):
     """Erreur d'I/O côté téléphonie (WebSocket coupée, etc.)."""

@@ -1,8 +1,10 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from hikky.exceptions import ReservationConflict
 from hikky.domain.dialogue_engine import DialogueEngine, TurnResult
 from hikky.domain.fallback_policy import (
     FallbackDecision,
@@ -16,6 +18,8 @@ from hikky.domain.restaurant_context import RestaurantContext
 from hikky.ports.call_log import CallLogPort
 from hikky.ports.notification import NotificationPort
 from hikky.ports.reservation import ReservationPort
+
+logger = logging.getLogger("hikky.call_session")
 
 
 @dataclass(frozen=True)
@@ -161,20 +165,27 @@ class CallSession:
         if not available:
             return None
 
-        reservation_id = await self._reservation.create(
-            restaurant_id=self.context.id,
-            date_time=intent.date_time,
-            party_size=intent.party_size,
-            customer_name=intent.customer_name,
-            customer_phone=customer_phone,
-        )
+        try:
+            reservation_id = await self._reservation.create(
+                restaurant_id=self.context.id,
+                date_time=intent.date_time,
+                party_size=intent.party_size,
+                customer_name=intent.customer_name,
+                customer_phone=customer_phone,
+            )
+        except ReservationConflict:
+            # Le Back a refusé (409) : créneau pris entre-temps ou réservation
+            # déjà en attente. On renvoie None — le tour annoncera « créneau
+            # indisponible » au lieu de prétendre à tort que c'est réservé.
+            logger.warning("réservation en conflit — non créée, on n'annonce pas de succès")
+            return None
         await self._notif.send_confirmation(reservation_id)
         await self._end(CallOutcome.RESERVATION_CREATED)
         return CallOutcome.RESERVATION_CREATED
 
-    # ── Interface du ConversationBrain ──────────────────────────────────
+    # ── Interface pour l'orchestrateur (routed_turn) ────────────────────
     #
-    # Le modèle conduit la conversation ; le code garde la main sur ce qui
+    # Le code conduit la conversation ; il garde la main sur ce qui
     # touche la base. `book` revérifie systématiquement la complétude, la
     # plage d'ouverture et la disponibilité, même quand le LLM affirme
     # qu'il faut réserver.

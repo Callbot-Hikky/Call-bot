@@ -124,7 +124,8 @@ class LLMSlotExtractor(SlotExtractor):
             logger.warning("LLM slot extraction call failed", exc_info=True)
             return {}
 
-        return _drop_invented_time(self._parse(raw, now), user_text)
+        slots = _drop_invented_time(self._parse(raw, now), user_text)
+        return _resolve_weekday_date(slots, user_text, now)
 
     def _parse(self, raw: str, now: datetime | None = None) -> dict[str, Any]:
         today = (now or self._clock()).date()
@@ -189,6 +190,35 @@ _VAGUE_PERIOD = re.compile(
 # Une heure réellement énoncée : un chiffre, ou « midi »/« minuit » (qui SONT
 # des heures valides et doivent, eux, être conservés).
 _EXPLICIT_HOUR = re.compile(r"\d|\bmidi\b|\bminuit\b", re.IGNORECASE)
+
+
+# Jours de la semaine : on résout le jour nommé nous-mêmes plutôt que de
+# faire confiance au calcul du LLM (constaté : un lundi, « jeudi » rendu comme
+# le vendredi suivant). L'index correspond à `date.weekday()` (lundi = 0).
+_WEEKDAY_TOKEN = re.compile(
+    r"\b(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\b", re.IGNORECASE
+)
+
+
+def _resolve_weekday_date(
+    slots: dict[str, Any], user_text: str, now: datetime
+) -> dict[str, Any]:
+    """Quand la phrase nomme un jour de la semaine, fixe `date` à sa prochaine
+    occurrence, de façon déterministe.
+
+    Le LLM se trompe régulièrement d'un jour sur « lundi/mardi/… » ; le nom du
+    jour est sans ambiguïté, autant le calculer en code. Absent tout jour
+    nommé, on ne touche pas à la date extraite (« demain », « le 17 »…).
+    """
+    from datetime import timedelta
+
+    match = _WEEKDAY_TOKEN.search(user_text or "")
+    if not match:
+        return slots
+    cible = _WEEKDAYS_FR.index(match.group(1).lower())
+    aujourdhui = now.date()
+    delta = (cible - aujourdhui.weekday()) % 7  # 0..6, prochaine occurrence
+    return {**slots, "date": aujourdhui + timedelta(days=delta)}
 
 
 def _drop_invented_time(slots: dict[str, Any], user_text: str) -> dict[str, Any]:

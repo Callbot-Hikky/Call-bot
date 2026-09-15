@@ -21,6 +21,9 @@ voice = [
     "faster-whisper>=1.0",
     "llama-cpp-python>=0.2.79",
     "piper-tts>=1.2",
+    # VAD d'endpointing téléphonique : découpe les tours de parole par
+    # détection d'activité vocale plutôt que par énergie (mots tronqués).
+    "webrtcvad>=2.0.10",
 ]
 # XTTS-v2. Bornes strictes : coqui-tts exige transformers>=4.57, et
 # transformers>=5 supprime des symboles qu'il utilise encore. Coqui

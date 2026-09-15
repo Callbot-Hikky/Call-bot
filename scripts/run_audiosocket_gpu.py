@@ -41,7 +41,7 @@ from hikky.adapters.voice.faster_whisper_stt import FasterWhisperSTTAdapter
 from hikky.adapters.voice.llama_cpp_llm import LlamaCppLLMAdapter
 from hikky.adapters.voice.piper_tts import PiperTTSAdapter
 from hikky.adapters.voice.xtts_tts import XttsTTSAdapter
-from hikky.domain.conversation_brain import ConversationBrain, QuestionAnswerer
+from hikky.domain.conversation_brain import QuestionAnswerer
 from hikky.domain.phraseur import Phraseur
 from hikky.pipeline.llm_slot_extractor import LLMSlotExtractor
 
@@ -149,7 +149,6 @@ async def main() -> None:
         stt_adapter=stt,
         tts_adapter=tts,
         slot_extractor=LLMSlotExtractor(llm),
-        brain=ConversationBrain(llm),
         answerer=QuestionAnswerer(llm),
         phraseur=Phraseur(llm),
     )

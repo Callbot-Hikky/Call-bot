@@ -18,8 +18,28 @@ _call_context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.Conte
 )
 
 
-def set_call_context(*, call_id: str, restaurant_id: str | None = None) -> None:
-    _call_context.set({"call_id": call_id, "restaurant_id": restaurant_id})
+def set_call_context(
+    *,
+    call_id: str,
+    restaurant_id: str | None = None,
+    ingest_ref: str | None = None,
+) -> None:
+    """Fixe le contexte de l'appel courant.
+
+    `ingest_ref` est une clé d'idempotence UNIQUE par appel, distincte du
+    `call_id` : le dialplan Asterisk peut renvoyer un UUID AudioSocket figé
+    (le même à chaque appel), ce qui faisait retomber toutes les
+    réservations sur la même clé et le backend les rejetait en 409. En
+    mintant `ingest_ref` à l'ouverture de connexion, l'ingestion reste
+    unique même quand `call_id` se répète.
+    """
+    _call_context.set(
+        {
+            "call_id": call_id,
+            "restaurant_id": restaurant_id,
+            "ingest_ref": ingest_ref,
+        }
+    )
 
 
 def clear_call_context() -> None:

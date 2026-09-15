@@ -101,6 +101,29 @@ async def test_finalize_refuses_when_slot_unavailable():
     assert session.last_availability_check is False
 
 
+async def test_finalize_renvoie_none_sur_conflit_de_reservation():
+    """Un 409 du Back (créneau qui vient d'être pris, résa déjà en attente…)
+    ne doit PAS être présenté comme un succès : `finalize` renvoie None, rien
+    n'est notifié, et le tour bascule sur « créneau indisponible »."""
+    from hikky.exceptions import ReservationConflict
+
+    session, reservation, _, notif = await _make_session(
+        llm_replies=["Quand ?", "Combien ?", "Nom ?", "..."]
+    )
+    reservation.set_availability("r-1", available=True)
+    reservation.create_error = ReservationConflict("POST /api/calls/ingest: 409")
+
+    await session.process_user_turn(
+        "Demain 20h", slot_updates={"date_time": datetime(2026, 7, 2, 20)}
+    )
+    await session.process_user_turn("4", slot_updates={"party_size": 4})
+    await session.process_user_turn("Dupont", slot_updates={"customer_name": "Dupont"})
+
+    outcome = await session.finalize_if_complete(customer_phone="+33600000000")
+    assert outcome is None
+    assert notif.sent == []
+
+
 async def test_finalize_refuses_when_date_outside_opening_hours():
     session, reservation, _, notif = await _make_session(
         llm_replies=["Quand ?", "Combien ?", "Nom ?", "..."]
