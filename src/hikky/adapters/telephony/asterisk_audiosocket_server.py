@@ -33,6 +33,7 @@ from asyncio import IncompleteReadError
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from hikky.observability.logging import clear_call_context, set_call_context
 
@@ -60,9 +61,8 @@ from hikky.adapters.telephony.barge_in import (
     TRAMES_DE_GARDE_PAR_DEFAUT,
     DetecteurInterruption,
 )
-from hikky.domain.brain_turn import run_brain_turn
+from hikky.adapters.telephony.vad_endpointer import VadEndpointer
 from hikky.domain.routed_turn import run_routed_turn
-from hikky.domain.turn_runner import run_turn
 from hikky.exceptions import TelephonyError, UnknownRestaurant
 
 WHISPER_SAMPLE_RATE_HZ = 16000
@@ -107,6 +107,21 @@ class AudioSocketServerConfig:
     min_speech_frames: int = 10
     max_utterance_frames: int = 750
     realtime_playback: bool = True
+    # VAD d'endpointing : agressivité webrtcvad (0 = laisse tout passer,
+    # 3 = ne garde que la parole franche) et préroll conservé avant l'attaque
+    # pour ne pas rogner le premier phonème.
+    vad_aggressiveness: int = 2
+    vad_padding_frames: int = 5
+    # Relance sur inactivité : si aucun tour de parole valable n'est produit
+    # pendant `inactivite_relance_s` après le dernier échange (réponse non
+    # captée, écho nettoyé par le VAD…), le bot relance (« vous êtes toujours
+    # là ? ») au lieu de rester muet. Il relance jusqu'à `inactivite_max_relances`
+    # fois — on NE raccroche PAS vite sur un client présent dont la voix passe
+    # mal — puis clôt seulement après la dernière relance restée sans réponse.
+    # `lecture_timeout_s` évite de bloquer sur une connexion à moitié ouverte.
+    inactivite_relance_s: float = 10.0
+    inactivite_max_relances: int = 3
+    lecture_timeout_s: float = 2.0
     # Nombre de trames de 20 ms écrites entre deux `drain`. Les paquets
     # AudioSocket restent à 20 ms — Asterisk n'en accepte pas d'autres,
     # un paquet plus gros casse la lecture. Ce qui est groupé, c'est
@@ -143,12 +158,8 @@ class AudioSocketServerDeps:
     tts_adapter: object | None = None
     slot_extractor: object | None = None
     customer_phone: str | None = None
-    # Moteur conversationnel unifié. S'il est fourni, il remplace le duo
-    # extracteur + générateur : un seul appel LLM, tout le contexte, et
-    # des actions. `slot_extractor` reste le chemin de repli.
-    brain: object | None = None
-    # Répondeur hors script. S'il est fourni, le parcours est piloté par
-    # le code (`question_router`) et le modèle n'intervient que sur les
+    # Répondeur hors script. Le parcours est piloté par le code
+    # (`question_router`/`routed_turn`) et le modèle n'intervient que sur les
     # vraies questions du client.
     answerer: object | None = None
     # Met en mots la question choisie par le code. Absent, le bot retombe
@@ -185,11 +196,14 @@ async def handle_connection(
             return
         call_id = str(first.call_uuid)
         adapter.bind_call(call_id, writer)
-        # Propager le call_id dans le contexte : il sert de clé d'idempotence
-        # (twilioCallSid) à l'ingestion. Sans ça, deux réservations au même
-        # créneau retombaient sur une clé date+heure identique et la seconde
-        # était considérée comme un doublon — donc jamais créée.
-        set_call_context(call_id=call_id)
+        # Clé d'idempotence UNIQUE par connexion pour l'ingestion. On ne se
+        # fie PAS au call_id d'Asterisk : selon le dialplan, l'UUID AudioSocket
+        # peut être FIGÉ (le même à chaque appel), et toutes les réservations
+        # retombaient alors sur la même clé (twilioCallSid) — le backend
+        # rejetait la 2ᵉ en 409 et elle n'était jamais créée. Un `ingest_ref`
+        # minté ici garantit l'unicité quel que soit le comportement d'Asterisk,
+        # tout en dédupliquant un même appel rejoué dans la même connexion.
+        set_call_context(call_id=call_id, ingest_ref=uuid4().hex)
         logger.info("call bound", extra={"call_id": call_id})
 
         # 2. Charger le contexte restaurant
@@ -288,16 +302,23 @@ async def run_ai_loop(
 
     await _speak(adapter, call_id, session.context.greeting, deps, config, reader=reader)
 
-    utterance = bytearray()
-    speech_frames = 0
-    silence_run = 0
+    endpointer = _build_endpointer(config)
+    loop = asyncio.get_running_loop()
+    derniere_activite = loop.time()
+    relances_faites = 0
 
     while True:
         try:
-            frame = await read_packet(reader)
+            frame = await asyncio.wait_for(
+                read_packet(reader), timeout=config.lecture_timeout_s
+            )
         except IncompleteReadError:
             logger.info("peer closed during AI loop", extra={"call_id": call_id})
             return
+        except TimeoutError:
+            # Aucun paquet reçu (connexion à moitié ouverte) : on ne bloque pas,
+            # on retombe sur la vérification d'inactivité ci-dessous.
+            frame = None
 
         if isinstance(frame, HangupFrame):
             logger.info("hangup from Asterisk", extra={"call_id": call_id})
@@ -308,43 +329,96 @@ async def run_ai_loop(
                 extra={"call_id": call_id, "code": frame.code},
             )
             continue
-        if not isinstance(frame, AudioFrame):
-            continue
 
-        if frame_rms(frame.audio) >= config.silence_rms_threshold:
-            utterance.extend(frame.audio)
-            speech_frames += 1
-            silence_run = 0
-            if speech_frames < config.max_utterance_frames:
-                continue
-        else:
-            if speech_frames == 0:
-                continue
-            utterance.extend(frame.audio)
-            silence_run += 1
-            if silence_run < config.silence_frames_to_end:
-                continue
+        pcm = None
+        if isinstance(frame, AudioFrame):
+            # Le VAD décide seul du point de coupure : il renvoie l'énoncé
+            # complet quand la parole s'arrête (hangover) ou à la longueur max,
+            # et None tant qu'on accumule.
+            pcm = endpointer.feed(frame.audio)
 
-        pcm = bytes(utterance)
-        collected = speech_frames
-        utterance.clear()
-        speech_frames = 0
-        silence_run = 0
-
-        if collected < config.min_speech_frames:
+        if pcm is None:
+            # Pas de tour prêt : surveille l'inactivité pour ne pas rester muet.
+            inactif = loop.time() - derniere_activite
+            action = _action_inactivite(
+                inactif, relances_faites=relances_faites, config=config
+            )
+            if action == "relance":
+                await _speak(
+                    adapter, call_id,
+                    "Êtes-vous toujours là ? Je reste à votre écoute.",
+                    deps, config, reader=reader,
+                )
+                relances_faites += 1
+            elif action == "fin":
+                await _speak(
+                    adapter, call_id,
+                    "Je n'ai pas de réponse, je vous laisse rappeler. Bonne journée !",
+                    deps, config, reader=reader,
+                )
+                logger.info("clôture sur inactivité", extra={"call_id": call_id})
+                return
             continue
 
         fini, audio_repris = await _process_turn(
             pcm, adapter, call_id, session, deps, config, reader=reader
         )
+        # Un vrai tour a eu lieu : on repart à zéro sur l'inactivité.
+        derniere_activite = loop.time()
+        relances_faites = 0
         if fini:
             return
         if audio_repris:
-            # Le client a coupe le bot : sa phrase a deja commence, on
-            # reprend la collecte a partir de ce qu'on a entendu.
-            utterance.extend(audio_repris)
-            speech_frames = len(audio_repris) // AUDIOSOCKET_CHUNK_20MS_BYTES
-            silence_run = 0
+            # Le client a coupé le bot : sa phrase a déjà commencé, on réinjecte
+            # ce qu'on a entendu pour reprendre la collecte sans la perdre.
+            endpointer.seed(audio_repris)
+
+
+def _action_inactivite(
+    inactif_s: float, *, relances_faites: int, config: AudioSocketServerConfig
+) -> str:
+    """Décide quoi faire après `inactif_s` sans tour de parole valable.
+
+    Le bot relance à chaque palier de `inactivite_relance_s`, jusqu'à
+    `inactivite_max_relances` fois — on ne raccroche pas vite sur un client
+    présent dont la voix passe mal (écho). On ne clôt (`"fin"`) qu'après le
+    dernier palier resté sans réponse. Renvoie "fin", "relance" ou "rien".
+    Pur et sans effet de bord pour être testable sans socket.
+    """
+    seuil = config.inactivite_relance_s
+    if (
+        relances_faites < config.inactivite_max_relances
+        and inactif_s >= seuil * (relances_faites + 1)
+    ):
+        return "relance"
+    if inactif_s >= seuil * (config.inactivite_max_relances + 1):
+        return "fin"
+    return "rien"
+
+
+def _build_endpointer(config: AudioSocketServerConfig) -> VadEndpointer:
+    """Construit l'endpointer VAD, avec repli sur un VAD énergie (RMS) si
+    `webrtcvad` n'est pas installé — le bot reste fonctionnel dans tous les cas.
+    """
+    common = dict(
+        frame_bytes=AUDIOSOCKET_CHUNK_20MS_BYTES,
+        sample_rate=config.sample_rate,
+        min_speech_frames=config.min_speech_frames,
+        hangover_frames=config.silence_frames_to_end,
+        start_padding_frames=config.vad_padding_frames,
+        max_utterance_frames=config.max_utterance_frames,
+    )
+    try:
+        import webrtcvad  # noqa: F401 — sonde la présence de la lib
+
+        return VadEndpointer(aggressiveness=config.vad_aggressiveness, **common)
+    except ImportError:
+        seuil = config.silence_rms_threshold
+        logger.warning(
+            "webrtcvad absent — repli sur un VAD d'énergie (RMS, seuil %.0f)",
+            seuil,
+        )
+        return VadEndpointer(vad=lambda f, sr: frame_rms(f) >= seuil, **common)
 
 
 async def _process_turn(
@@ -372,43 +446,24 @@ async def _process_turn(
         if resultat.interrompu and resultat.audio_client:
             interruption["audio"] = resultat.audio_client
 
-    if deps.answerer is not None:
-        state = _routing_state(session)
-        outcome = await run_routed_turn(
-            session=session,
-            user_text=text,
-            customer_phone=deps.customer_phone,
-            history=_history_for(session),
-            extractor=deps.slot_extractor,
-            answerer=deps.answerer,
-            awaiting_confirmation=state["awaiting"],
-            speak=_say,
-            recent_phrasings=state["phrasings"],
-            phraseur=deps.phraseur,
-        )
-        state["awaiting"] = outcome.awaiting_confirmation
-        return outcome.should_end, interruption["audio"]
-
-    if deps.brain is not None:
-        decision = await run_brain_turn(
-            session=session,
-            brain=deps.brain,
-            user_text=text,
-            customer_phone=deps.customer_phone,
-            history=_history_for(session),
-            extractor=deps.slot_extractor,
-            speak=_say,
-        )
-        return decision.should_end, interruption["audio"]
-
-    legacy = await run_turn(
+    # Le parcours est piloté par le code : `routed_turn` collecte les slots,
+    # ne sollicite le modèle que sur les vraies questions (`answerer`), et
+    # garde la main sur la vérification de dispo et la réservation.
+    state = _routing_state(session)
+    outcome = await run_routed_turn(
         session=session,
-        slot_extractor=deps.slot_extractor,
         user_text=text,
         customer_phone=deps.customer_phone,
+        history=_history_for(session),
+        extractor=deps.slot_extractor,
+        answerer=deps.answerer,
+        awaiting_confirmation=state["awaiting"],
         speak=_say,
+        recent_phrasings=state["phrasings"],
+        phraseur=deps.phraseur,
     )
-    return legacy.should_end, interruption["audio"]
+    state["awaiting"] = outcome.awaiting_confirmation
+    return outcome.should_end, interruption["audio"]
 
 
 def _routing_state(session: object) -> dict:

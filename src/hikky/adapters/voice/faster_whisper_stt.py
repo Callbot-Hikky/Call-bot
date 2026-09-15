@@ -28,6 +28,7 @@ sans ces librairies installées.
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -47,11 +48,13 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 # de Rian » est devenu « Au nom de rien », et le prénom a été perdu.
 # Orienter le décodage vers le vocabulaire du domaine réduit nettement ces
 # confusions, surtout sur les noms propres et les horaires.
+# On garde un contexte lexical COURT et sans énumération : la liste de
+# nombres (« une personne, deux, trois… ») fuyait dans la sortie et faisait
+# apparaître des `party_size` fantômes. Quelques mots-clés du domaine
+# suffisent à orienter le décodage sans risque d'écho.
 DOMAIN_PROMPT = (
-    "Réservation de table au restaurant. Nombre de personnes : "
-    "une personne, deux, trois, quatre, cinq, six, sept, huit personnes. "
-    "Vocabulaire : réserver, réservation, table, couverts, midi, soir, "
-    "demain, ce soir, heures, et demie, au nom de, monsieur, madame."
+    "Réservation de table au restaurant : réserver, table, couverts, "
+    "midi, soir, demain, à quelle heure, au nom de, monsieur, madame."
 )
 
 
@@ -139,6 +142,13 @@ class FasterWhisperSTTAdapter(SpeechRecognitionPort):
                     # Rejette les segments sans parole (silences → hallucinations).
                     no_speech_threshold=0.6,
                     log_prob_threshold=-1.0,
+                    # Filtre VAD intégré (Silero) : découpe et jette le
+                    # non-parole AVANT le décodage. En téléphonie, silences et
+                    # échos de la voix du bot font halluciner Whisper
+                    # (« Sous-titrage MFP ») ; les couper à la source supprime
+                    # ces tours fantômes, en amont du filtre par marqueurs.
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300},
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -187,4 +197,25 @@ def _is_hallucination(text: str) -> bool:
     normalise = (text or "").strip().lower()
     if not normalise:
         return True
-    return any(marker in normalise for marker in _HALLUCINATION_MARKERS)
+    if any(marker in normalise for marker in _HALLUCINATION_MARKERS):
+        return True
+    return _is_repetition_loop(normalise)
+
+
+def _is_repetition_loop(normalise: str) -> bool:
+    """Détecte les boucles de répétition de Whisper.
+
+    Sur l'écho de la voix du bot (ligne sans annulation d'écho), Whisper part
+    en boucle : « Bonne nuit. Bonne nuit. Bonne nuit… » ×12, ou « les les les
+    les… ». Ce sont des hallucinations à très faible diversité lexicale, pas
+    de la parole. On les repère par le ratio mots uniques / mots totaux, et on
+    ne déclenche qu'à partir de 6 mots pour ne pas jeter un « oui oui » ou un
+    « non non merci » légitime.
+    """
+    mots = [m for m in re.findall(r"\w+", normalise) if m]
+    if len(mots) < 6:
+        return False
+    uniques = len(set(mots))
+    # Une phrase normale garde une bonne diversité ; une boucle tombe très bas
+    # (« bonne nuit »×12 → 2 mots uniques sur 24).
+    return uniques <= max(2, len(mots) // 4)

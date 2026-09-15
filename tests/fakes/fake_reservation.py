@@ -9,6 +9,8 @@ class FakeReservation(ReservationPort):
         self._availability: dict[str, bool] = {}
         self.reservations: dict[str, dict] = {}
         self.callback_requests: dict[str, dict] = {}
+        # Permet de simuler un refus du Back à la création (ex. 409).
+        self.create_error: Exception | None = None
 
     def set_availability(self, restaurant_id: str, available: bool) -> None:
         self._availability[restaurant_id] = available
@@ -26,6 +28,8 @@ class FakeReservation(ReservationPort):
         customer_name: str,
         customer_phone: str | None,
     ) -> str:
+        if self.create_error is not None:
+            raise self.create_error
         rid = f"res-{uuid4().hex[:8]}"
         self.reservations[rid] = {
             "restaurant_id": restaurant_id,

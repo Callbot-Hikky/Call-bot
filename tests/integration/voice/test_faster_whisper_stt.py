@@ -168,6 +168,20 @@ async def test_domain_prompt_is_passed_to_whisper(fake_whisper_module):
     assert "table" in prompt.lower()
 
 
+async def test_vad_filter_est_active_pour_couper_le_non_parole(
+    fake_whisper_module, passthrough_audio_conversion
+):
+    """En téléphonie, Whisper « meuble » les silences/échos par des
+    hallucinations (« Sous-titrage MFP »). Le filtre VAD intégré coupe le
+    non-parole AVANT le décodage — c'est le correctif de fond, en amont du
+    filtre par marqueurs."""
+    _, model = fake_whisper_module
+    adapter = FasterWhisperSTTAdapter()
+    stream = await adapter.transcribe(_audio([b"\x00" * 320]))
+    [t async for t in stream]
+    assert model.transcribe.call_args.kwargs["vad_filter"] is True
+
+
 async def test_domain_prompt_can_be_overridden(fake_whisper_module):
     _, model = fake_whisper_module
     adapter = FasterWhisperSTTAdapter(initial_prompt="vocabulaire maison")

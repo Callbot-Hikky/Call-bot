@@ -118,6 +118,119 @@ async def test_call_id_is_used_as_the_idempotency_key(
     assert body["twilioCallSid"] == "appel-77"
 
 
+async def test_ingest_ref_rend_la_cle_unique_meme_si_le_call_id_est_constant(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """Bug réel : le dialplan Asterisk renvoyait un UUID AudioSocket FIGÉ, donc
+    `call_id` (→ twilioCallSid) était identique à chaque appel ; la 2ᵉ
+    réservation d'un même créneau repartait sur la même clé d'idempotence et
+    le backend renvoyait 409 (jamais créée). Un `ingest_ref` unique par
+    connexion doit garantir l'unicité MÊME quand `call_id` se répète."""
+    import json
+
+    from hikky.observability.logging import clear_call_context, set_call_context
+
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST",
+        json={"reservation": {"id": "res"}}, is_reusable=True,
+    )
+    sids = []
+    for ref in ("uniq-1", "uniq-2"):
+        set_call_context(call_id="UUID-FIGE", ingest_ref=ref)
+        try:
+            await adapter.create("r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None)
+        finally:
+            clear_call_context()
+    for req in httpx_mock.get_requests():
+        if req.method == "POST":
+            sids.append(json.loads(req.read())["twilioCallSid"])
+    assert sids[0] != sids[1]  # clés distinctes malgré le même call_id
+
+
+async def test_table_overlap_reessaie_avec_une_autre_table_et_reussit(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """Course check-then-act : `availability` renvoie une table, mais elle est
+    prise au moment de l'`ingest` → 409 `table_overlap`. Le bot doit
+    re-demander une table libre et réessayer, plutôt que de refuser à tort un
+    créneau qui a d'autres tables libres."""
+    import json
+
+    # availability renvoie d'abord tbl-1 (prise), puis tbl-2 (libre).
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-2", "alternatives": []},
+    )
+    # 1er ingest : table prise ; 2e : succès.
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST", status_code=409,
+        json={"error": "table_overlap", "message": "already booked"},
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST",
+        json={"reservation": {"id": "res-ok"}},
+    )
+
+    rid = await adapter.create("r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None)
+    assert rid == "res-ok"
+    posts = [json.loads(r.read()) for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert posts[0]["reservation"]["tableId"] == "tbl-1"
+    assert posts[1]["reservation"]["tableId"] == "tbl-2"  # nouvelle table au retry
+
+
+async def test_table_overlap_persistant_finit_en_reservation_conflict(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """Si toutes les tables restent prises (overlap à chaque essai), on renonce
+    proprement en `ReservationConflict` (le bot dira « créneau indisponible »)."""
+    from hikky.exceptions import ReservationConflict
+
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST", status_code=409,
+        json={"error": "table_overlap", "message": "already booked"},
+        is_reusable=True,
+    )
+    with pytest.raises(ReservationConflict):
+        await adapter.create("r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None)
+
+
+async def test_un_conflit_409_leve_reservation_conflict(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """La clé d'idempotence étant désormais unique par appel, un 409 n'est
+    plus une collision de clé : c'est un vrai conflit métier. L'adapter lève
+    `ReservationConflict` (que la couche domaine traduira en « créneau
+    indisponible »), et NON un faux succès — le bot ne doit pas annoncer une
+    réservation qui n'existe pas. Ce n'est pas non plus un `BackUnavailable`
+    qui planterait l'appel."""
+    from hikky.exceptions import ReservationConflict
+
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST", status_code=409,
+    )
+    with pytest.raises(ReservationConflict):
+        await adapter.create("r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None)
+
+
 async def test_missing_phone_is_replaced_by_a_placeholder(
     httpx_mock: HTTPXMock, adapter, base_url: str
 ):
@@ -138,6 +251,36 @@ async def test_missing_phone_is_replaced_by_a_placeholder(
     post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
     body = json.loads(post.read())
     assert body["customer"]["phone"]
+
+
+async def test_le_placeholder_de_telephone_tient_dans_varchar_32(
+    httpx_mock: HTTPXMock, adapter, base_url: str
+):
+    """La colonne `customers.phone` est un varchar(32). Le placeholder anonyme
+    doit tenir dedans : `inconnu-<ingest_ref 32 hex>` faisait 40 caractères et
+    le backend rejetait CHAQUE réservation anonyme (« value too long », mappé en
+    409). Le placeholder doit rester ≤ 32."""
+    import json
+
+    from hikky.observability.logging import clear_call_context, set_call_context
+
+    httpx_mock.add_response(
+        method="GET",
+        json={"available": True, "tableId": "tbl-1", "alternatives": []},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=f"{base_url}/api/calls/ingest", method="POST",
+        json={"reservation": {"id": "res-1"}},
+    )
+    set_call_context(call_id="c", ingest_ref="a" * 32)  # ingest_ref = uuid4().hex
+    try:
+        await adapter.create("r-1", datetime(2026, 7, 22, 20), 4, "Dupont", None)
+    finally:
+        clear_call_context()
+    post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+    phone = json.loads(post.read())["customer"]["phone"]
+    assert len(phone) <= 32, f"{phone!r} fait {len(phone)} > 32"
 
 
 async def test_already_processed_returns_the_existing_reservation(
