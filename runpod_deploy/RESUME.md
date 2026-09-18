@@ -5,10 +5,13 @@ sur le pod** : ce dossier contient les fichiers exacts qui tournent. Les modèle
 et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
 
 ## Accès au pod
-- Pod RunPod : `uv9jklqxm6vwnj` (A40 48 Go, image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1`)
-- SSH direct : `ssh -i ~/.ssh/id_ed25519 root@69.30.85.117 -p 22062`
-  (via rtk : `rtk proxy ssh -i ~/.ssh/id_ed25519 root@69.30.85.117 -p 22062 '<cmd>'`)
-- URL publique orchestrateur : `https://uv9jklqxm6vwnj-19123.proxy.runpod.net`
+- Pod ACTUEL : `bce9t96esxjwyo` (A40 48 Go, image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1`), reconstruit 2026-09-18.
+- SSH direct : `ssh -i ~/.ssh/id_ed25519 root@194.68.245.2 -p 22072`
+  (via rtk : `rtk proxy ssh -i ~/.ssh/id_ed25519 root@194.68.245.2 -p 22072 '<cmd>'`)
+  Note : sshd peut mettre ~4-5 min à répondre après le démarrage d'un pod neuf.
+- URL publique orchestrateur : `https://bce9t96esxjwyo-19123.proxy.runpod.net`
+- `PUBLIC_HOST` (env orchestrateur) = `bce9t96esxjwyo-19123.proxy.runpod.net` (déjà dans run_telnyx.sh).
+- Ancien pod `uv9jklqxm6vwnj` (69.30.85.117:22062) : ARRÊTÉ, jamais pu redémarrer (pas de GPU libre) → d'où ce rebuild. À supprimer quand plus utile.
 - Port SSH direct peut changer : `runpodctl pod list` + API GraphQL pour les ports
   (`curl "https://api.runpod.io/graphql?api_key=$KEY" -d '{"query":"query{pod(input:{podId:\"uv9jklqxm6vwnj\"}){runtime{ports{ip privatePort publicPort type}}}}"}'`)
 
