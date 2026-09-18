@@ -57,7 +57,7 @@ class FastTTS:
         self.pg.capture(num_warmup=3)
 
     @torch.inference_mode()
-    def generate(self, text, speaker, instruct, max_frames=512, do_sample=True,
+    def generate(self, text, speaker, instruct, max_frames=160, do_sample=True,
                  top_k=50, top_p=1.0, temperature=0.9, rep_pen=1.05):
         m = self.m; model = self.model; talker = self.talker
         tg = self.tg; pg = self.pg; NG = self.NG
@@ -110,7 +110,7 @@ class FastTTS:
 
     @torch.inference_mode()
     def generate_stream(self, text, speaker, instruct, emit_frames=16, holdback=2,
-                        max_frames=512, do_sample=True, top_k=50, top_p=1.0,
+                        max_frames=160, do_sample=True, top_k=50, top_p=1.0,
                         temperature=0.9, rep_pen=1.05):
         """Generateur : yield (pcm_float32_numpy, fs) par chunks de ~emit_frames
         frames (~1.08s a 12 Hz pour 13). Holdback : on retient les `holdback`
