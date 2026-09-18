@@ -130,6 +130,8 @@ async def stream(ws: WebSocket):
     silence = 0
     speech = 0
     bargein = 0
+    preroll = bytearray()   # ~200ms d'audio avant l'attaque (evite de couper la 1re syllabe)
+    PREROLL_BYTES = 3200    # 0.2s @ 8kHz PCM16
 
     async def send_ulaw(frames):
         # Telnyx bufferise et joue lui-meme ; 1 message media / seconde max.
@@ -204,6 +206,8 @@ async def stream(ws: WebSocket):
     async def do_turn(buf: bytes):
         nonlocal awaiting
         buf16, _ = audioop.ratecv(buf, 2, 1, 8000, 16000, None)
+        _pad = b"\x00" * (16000 * 2 * 2 // 5)   # ~0.4s de silence 16kHz (contexte encodeur)
+        buf16 = _pad + buf16 + _pad
         text = await transcribe(buf16)
         if not text:
             # STT vide : ne jamais rester muet -> redemander (adapte au contexte).
@@ -256,6 +260,8 @@ async def stream(ws: WebSocket):
             else:
                 bargein = 0
             if rms >= THRESH:
+                if speech == 0:
+                    utter += preroll        # attaque : injecter le pre-roll
                 utter += pcm
                 speech += 1
                 silence = 0
@@ -270,6 +276,9 @@ async def stream(ws: WebSocket):
                     silence = 0
                     if n >= MIN_SPEECH and not speaking:
                         asyncio.create_task(do_turn(buf))
+            preroll += pcm
+            if len(preroll) > PREROLL_BYTES:
+                del preroll[:len(preroll) - PREROLL_BYTES]
         elif ev == "stop":
             log.info("appel termine stream=%s", stream_id)
             break
