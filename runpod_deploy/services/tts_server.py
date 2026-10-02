@@ -16,7 +16,10 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
 app = FastAPI()
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+import threading, asyncio, faulthandler, signal
+import queue as _queue
+faulthandler.register(signal.SIGUSR1, all_threads=True)  # kill -USR1 <pid> -> piles de tous les threads
 try:
     import streaming_engine as _se
     _STREAM_OK = True
@@ -60,14 +63,47 @@ def _warm():
             print("[tts] FAST engine indisponible: %s" % _e, flush=True)
 
 
+# --- Verrou du moteur CUDA-graph : jamais une attente silencieuse de 60 s.
+# Observe en prod : un stream abandonne par le client a garde le verrou pour
+# toujours -> TTFA 67 s, 87 s, 100 s, 889 s en file derriere lui.
+LOCK_ACQUIRE_TIMEOUT = 10.0   # au-dela : 503 immediat, l'orchestrateur reagit
+LOCK_STUCK_AFTER = 60.0       # un detenteur plus vieux = anomalie (health ok:false)
+_lock_held_since = None
+
+def _acquire(lock):
+    global _lock_held_since
+    got = lock.acquire(timeout=LOCK_ACQUIRE_TIMEOUT)
+    if got:
+        _lock_held_since = time.time()
+    else:
+        age = time.time() - (_lock_held_since or time.time())
+        print(f"[tts] VERROU OCCUPE depuis {age:.0f}s - requete refusee (503)", flush=True)
+    return got
+
+def _release(lock):
+    global _lock_held_since
+    _lock_held_since = None
+    lock.release()
+
+def _lock_stuck():
+    return _lock_held_since is not None and time.time() - _lock_held_since > LOCK_STUCK_AFTER
+
+def _busy_503():
+    return JSONResponse({"error": "tts busy"}, status_code=503)
+
+
 @app.post("/synthesize")
 def synthesize(req: Req):
     m = get_model()
     t = time.time()
     if _fast is not None:
         import fast_tts
-        with fast_tts.LOCK:
+        if not _acquire(fast_tts.LOCK):
+            return _busy_503()
+        try:
             _w, sr, _nf = _fast.generate(req.text, SPEAKER, INSTRUCT)
+        finally:
+            _release(fast_tts.LOCK)
         wav = np.asarray(_w, dtype=np.float32)
     else:
         wavs, sr = m.generate_custom_voice(text=req.text, language="French", speaker=SPEAKER, instruct=INSTRUCT)
@@ -80,29 +116,61 @@ def synthesize(req: Req):
 
 
 @app.post("/synthesize_stream")
-def synthesize_stream(req: Req):
+async def synthesize_stream(req: Req):
     m = get_model()
-    def gen():
+    import fast_tts
+    loop = asyncio.get_running_loop()
+    if _fast is not None:
+        # acquisition dans un thread : ne bloque jamais la boucle d'evenements
+        if not await loop.run_in_executor(None, _acquire, fast_tts.LOCK):
+            return _busy_503()
+    q = _queue.Queue()            # non borne : <= ~13 chunks de ~60 Ko, jamais bloquant
+    stop = threading.Event()      # leve quand le client coupe (raccrochage, barge-in)
+    _END = object()
+
+    def worker():
         t0 = time.time(); first = True
-        if _fast is not None:
-            import fast_tts
-            with fast_tts.LOCK:
-                for pcm_f32, sr in _fast.generate_stream(req.text, SPEAKER, INSTRUCT):
-                    if first:
-                        print("[tts] FAST TTFA=%.3fs" % (time.time() - t0), flush=True); first = False
-                    b = (np.clip(pcm_f32, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
-                    yield struct.pack(">I", len(b)) + b
-        else:
-            for pcm_f32, sr in _se.stream_custom_voice(m, text=req.text, speaker=SPEAKER,
-                                                       language="French", instruct=INSTRUCT):
+        it = None
+        try:
+            it = (_fast.generate_stream(req.text, SPEAKER, INSTRUCT) if _fast is not None
+                  else _se.stream_custom_voice(m, text=req.text, speaker=SPEAKER,
+                                               language="French", instruct=INSTRUCT))
+            for pcm_f32, sr in it:
+                if stop.is_set():
+                    break                      # client parti : on arrete de generer
                 if first:
-                    print("[tts] TTFA=%.3fs" % (time.time() - t0), flush=True); first = False
+                    print("[tts] FAST TTFA=%.3fs" % (time.time() - t0), flush=True); first = False
                 b = (np.clip(pcm_f32, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
-                yield struct.pack(">I", len(b)) + b
-    return StreamingResponse(gen(), media_type="application/octet-stream",
+                q.put(struct.pack(">I", len(b)) + b)
+        except Exception as e:  # noqa: BLE001
+            print("[tts] stream erreur: %r" % (e,), flush=True)
+        finally:
+            close = getattr(it, "close", None)
+            if close is not None:
+                try: close()                   # finalise le generateur
+                except Exception: pass         # noqa: BLE001
+            if _fast is not None:
+                _release(fast_tts.LOCK)        # TOUJOURS rendu, meme si le client a raccroche
+            q.put(_END)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def agen():
+        try:
+            while True:
+                item = await loop.run_in_executor(None, q.get)
+                if item is _END:
+                    break
+                yield item
+        finally:
+            stop.set()   # Starlette ferme l'async-gen a la deconnexion -> on arrete le worker
+
+    return StreamingResponse(agen(), media_type="application/octet-stream",
                              headers={"X-Sample-Rate": "24000"})
 
 
 @app.get("/health")
 def health():
-    return {"ok": _model is not None}
+    stuck = _lock_stuck()
+    held = None if _lock_held_since is None else round(time.time() - _lock_held_since, 1)
+    return {"ok": _model is not None and not stuck, "lock_held_s": held, "lock_stuck": stuck}
