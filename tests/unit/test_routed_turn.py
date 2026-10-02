@@ -102,10 +102,33 @@ async def test_client_question_reaches_the_model():
     dits = []
     await _run(FakeSession(), "Vous êtes ouverts le dimanche ?", dits, answerer=a)
     assert a.appels == ["Vous êtes ouverts le dimanche ?"]
-    # La reponse du modele est prononcee, PUIS on relance sur ce qui
-    # manque : sans ca la conversation resterait en suspens.
-    assert dits[0].startswith("Nous sommes fermés le dimanche.")
-    assert dits[0].endswith("?")
+    # Appel d'information pur (aucun creneau engage) : on repond, point.
+    # Observe en prod : « a chaque fin de reponse l'IA me casse la tete pour
+    # reserver » — la relance systematique est supprimee.
+    assert dits[0] == "Nous sommes fermés le dimanche."
+
+
+async def test_a_question_during_a_booking_resumes_the_missing_slot():
+    """Reservation en cours : apres la reponse, on reprend sur ce qui manque."""
+    a = FakeAnswerer("Oui, nous avons une terrasse.")
+    s = FakeSession(ReservationIntent().with_date(date(2026, 7, 22)).with_time(time(12)))
+    dits = []
+    await _run(s, "Vous avez une terrasse ?", dits, answerer=a)
+    assert dits[0].startswith("Oui, nous avons une terrasse.")
+    assert dits[0].endswith("?") and "personne" in dits[0].lower(), dits[0]
+
+
+def test_no_relance_twice_in_a_row():
+    """Si notre phrase precedente etait deja une relance, on repond seulement."""
+    from hikky.domain.routed_turn import _ensure_progress
+    intent = ReservationIntent().with_date(date(2026, 7, 22)).with_time(time(12))
+    history = [
+        {"role": "user", "content": "vous avez une terrasse"},
+        {"role": "assistant", "content": "Oui. Vous serez combien de personnes ?"},
+    ]
+    assert _ensure_progress("Nous sommes au centre-ville.", intent, set(), history) == "Nous sommes au centre-ville."
+    # ... mais sans relance precedente, on reprend bien.
+    assert _ensure_progress("Nous sommes au centre-ville.", intent, set(), []).endswith("?")
 
 
 async def test_the_model_is_not_called_on_an_ordinary_turn():
