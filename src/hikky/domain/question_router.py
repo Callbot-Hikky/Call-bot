@@ -49,13 +49,67 @@ class RouteDecision:
 # Le client pose une question plutôt que d'y répondre. Sans cette
 # détection, « À quel nom ? » recevait « C'est à quel nom ? » — le bot
 # renvoyait la question au lieu d'y répondre.
-_QUESTION_MARKERS = (
-    "est-ce que", "êtes-vous", "etes-vous", "avez-vous", "vous êtes",
-    "vous etes", "c'est quoi", "c'est quand", "quel est", "quelle est",
+#
+# Observé en appel réel (transcriptions brutes) : « Oui, bonjour, je voulais
+# savoir est ce que … halal ? » et « Non, non, je voulais vous poser la
+# question, c'est quoi l'ambiance ? » n'étaient PAS des questions pour le
+# bot — le « oui »/« non » de politesse en tête passait pour un accord ou un
+# refus et court-circuitait la détection. « est ce que » sans tiret (sortie
+# STT courante) n'était pas reconnu non plus, et « vous avez une terrasse »
+# sans « ? » ne contenait aucun marqueur. D'où trois étages :
+#
+# 1. on retire les interjections de tête (« oui, bonjour, euh… ») ;
+# 2. une TOURNURE FORTE suffit (« est-ce que », « c'est quoi », « avez-vous ») ;
+# 3. une tournure FAIBLE (« vous avez », « c'est », « il y a ») ne suffit que
+#    si la phrase parle d'un THÈME du restaurant (terrasse, halal, parking…)
+#    — « il y a quatre personnes » reste une réponse, pas une question.
+_QUESTION_FORTE = (
+    "est-ce que", "est-ce qu'", "qu'est-ce",
+    "c'est quoi", "c'est quand", "c'est où", "c'est ou", "c'est combien",
+    "c'est comment", "quel est", "quelle est", "quels sont", "quelles sont",
     "à quel", "a quel", "à quelle", "a quelle", "combien de temps",
-    "pouvez-vous me dire", "peux-tu me dire", "répéter", "repeter",
-    "pas compris", "pas entendu", "pardon", "comment ça", "qu'est-ce",
-    "vous faites", "y a-t-il", "il y a", "je peux", "on peut",
+    "combien ça", "combien ca", "combien coûte", "combien coute",
+    "combien c'est", "quel prix", "quels prix", "ça coûte", "ca coute",
+    "pouvez-vous me", "pourriez-vous me", "peux-tu me", "vous pouvez me",
+    "répéter", "repeter", "pas compris", "pas entendu", "pardon",
+    "comment ça", "comment ca", "comment on", "comment vous", "comment fait",
+    "où est", "ou est", "où se trouve", "où êtes", "où etes", "pourquoi",
+    "y a-t-il", "avez-vous", "êtes-vous", "etes-vous", "faites-vous",
+    "acceptez-vous", "proposez-vous", "servez-vous", "prenez-vous",
+    "peut-on", "puis-je", "pourrais-je",
+    "je voulais savoir", "je voudrais savoir", "j'aimerais savoir",
+    "je veux savoir", "savoir si", "une question", "je me demandais",
+    "dites-moi", "c'est possible", "possible de",
+)
+
+# Tournures qui n'interrogent que si le sujet est un fait du restaurant.
+_QUESTION_FAIBLE = re.compile(
+    r"(?<!\w)(c'est|est|sont|ont|a|il y a|y a|vous avez|vous êtes|vous etes|"
+    r"vous faites|vous acceptez|vous proposez|vous servez|vous prenez|"
+    r"vous livrez|on peut|je peux|possible|ouverts?|ouvertes?)(?!\w)"
+)
+
+# Ce dont un client s'enquiert au téléphone, hors créneau de réservation.
+_THEMES_RESTAURANT = re.compile(
+    r"(?<!\w)(halal|hallal|casher|kasher|v[ée]g[ée]\w*|vegan\w*|bio|gluten|"
+    r"allerg\w*|terrasse|rooftop|toit|parking|gar[ée]r|stationn\w*|wifi|"
+    r"climatis\w*|clim|chaises? hautes?|b[ée]b[ée]s?|enfants?|poussettes?|"
+    r"animau\w*|chiens?|chats?|accessib\w*|fauteuils?|handicap\w*|pmr|"
+    r"carte|cb|esp[èe]ces|tickets?|ch[èe]ques?|paiement|payer|prix|tarifs?|"
+    r"cher|ch[èe]re|co[ûu]te|budget|menus?|plats?|formules?|desserts?|"
+    r"sp[ée]cialit\w*|cuisine|pizzas?|poissons?|viandes?|emporter|livr\w*|"
+    r"ambiance|adresse|situ[ée]s?|m[ée]tro|ouverts?|ferm[ée]s?|horaires?|"
+    r"tenue|privatis\w*|anniversaires?|f[êe]tes?|boissons?|vins?|alcool|"
+    r"bar|musique|fumeurs?|toilettes|wc|groupes?)(?!\w)"
+)
+
+# Politesses et hésitations en tête de phrase : elles ne portent aucun sens
+# et masquaient la question qui suivait.
+_INTERJECTIONS = re.compile(
+    r"^(?:(?:oui|ouais|non|nan|bonjour|bonsoir|allô|allo|alors|euh|bah|ben|"
+    r"hein|merci|et|donc|dites|voilà|voila|en fait|du coup|d'accord|ok|okay|"
+    r"excusez-moi|excusez moi|s'il vous plaît|s'il vous plait|svp)"
+    r"[\s,.!;:]+)+"
 )
 
 # Sur un appel réel, le client a confirmé par « Ouais, à peu près » puis
@@ -104,20 +158,47 @@ def is_agreement(text: str) -> bool:
     return any(_contient_expression(t, a) for a in _ACCORD)
 
 
+def _normaliser_question(text: str) -> str:
+    """Aplanit les variantes de transcription avant de chercher les tournures.
+
+    Le STT écrit « est ce que », « est-ce-que », des apostrophes typographiques
+    et des espaces en trop : la détection ne doit dépendre d'aucun de ces
+    détails.
+    """
+    t = _normalise(text).replace("’", "'").replace("‘", "'")
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\best[ -]ce[ -]qu", "est-ce qu", t)
+    t = re.sub(r"\bqu[' ]est[ -]ce\b", "qu'est-ce", t)
+    t = re.sub(r"\by[' ]?a[ -]t[ -]?'?il\b", "y a-t-il", t)
+    return t
+
+
+def _sans_interjections(texte: str) -> str:
+    return _INTERJECTIONS.sub("", texte).strip()
+
+
 def is_client_question(text: str) -> bool:
     """Le client interroge-t-il, plutôt que de répondre ?
 
     Un point d'interrogation seul ne suffit pas : la transcription en
-    ajoute ou en retire. On s'appuie aussi sur des tournures.
+    ajoute ou en retire. On s'appuie sur des tournures, après avoir ôté les
+    « oui », « non », « bonjour » de politesse qui précèdent souvent la
+    vraie question au téléphone.
     """
     if not text:
         return False
-    lowered = text.lower()
-    if is_agreement(text) or is_refusal(text):
+    coeur = _sans_interjections(_normaliser_question(text))
+    if not coeur:
         return False
-    if any(m in lowered for m in _QUESTION_MARKERS):
+    if any(_contient_expression(coeur, m) for m in _QUESTION_FORTE):
         return True
-    return "?" in text and len(text.split()) > 2
+    # Un accord ou un refus net n'est pas une question — mais on le juge sur
+    # le cœur de la phrase, pas sur le « oui » de politesse qui l'ouvre.
+    if is_agreement(coeur) or is_refusal(coeur):
+        return False
+    if "?" in text and len(text.split()) > 2:
+        return True
+    return bool(_QUESTION_FAIBLE.search(coeur) and _THEMES_RESTAURANT.search(coeur))
 
 
 def route_turn(

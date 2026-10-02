@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -29,6 +30,12 @@ class RestaurantContext(BaseModel):
     rules: RestaurantRules
     transfer_number: str | None = None
     fallback_message: str
+    address: str | None = None
+    # Ce que le restaurant déclare de lui-même (halal, terrasse, parking,
+    # moyens de paiement…) : JSON libre côté backend, lu tel quel. C'est la
+    # matière dont l'answerer a besoin pour répondre à « vous avez une
+    # terrasse ? » autrement que par « je n'ai pas cette information ».
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("opening_hours")
     @classmethod

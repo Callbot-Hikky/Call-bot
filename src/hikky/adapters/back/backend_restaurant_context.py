@@ -59,10 +59,16 @@ def _to_context(payload: dict[str, Any]) -> RestaurantContext:
     name = restaurant.get("name") or "notre restaurant"
     regles = _rules(payload.get("policies") or {})
     horaires = _opening_hours(payload.get("hours") or [])
+    # `attributes` (halal, terrasse, paiements…) était renvoyé par le backend
+    # depuis la V9 mais jamais lu : le bot répondait « je n'ai pas cette
+    # information » à des questions dont la réponse était dans la charge utile.
+    attributs = payload.get("attributes")
+    if not isinstance(attributs, dict):
+        attributs = {}
 
     logger.info(
-        "contexte chargé : %s, %d plage(s) d'ouverture, %d couverts max",
-        name, len(horaires), regles.max_group_size,
+        "contexte chargé : %s, %d plage(s) d'ouverture, %d couverts max, %d groupe(s) d'attributs",
+        name, len(horaires), regles.max_group_size, len(attributs),
     )
 
     return RestaurantContext(
@@ -83,7 +89,19 @@ def _to_context(payload: dict[str, Any]) -> RestaurantContext:
         rules=regles,
         transfer_number=None,
         fallback_message="Je vous rappelle au plus vite, merci de votre appel.",
+        address=_adresse(restaurant),
+        attributes=attributs,
     )
+
+
+def _adresse(restaurant: dict[str, Any]) -> str | None:
+    """« 12 rue de la République, 69002 Lyon » — ou None si rien n'est saisi."""
+    rue = (restaurant.get("address") or "").strip()
+    ville = " ".join(
+        p for p in ((restaurant.get("postalCode") or "").strip(), (restaurant.get("city") or "").strip()) if p
+    )
+    morceaux = [p for p in (rue, ville) if p]
+    return ", ".join(morceaux) or None
 
 
 def _rules(policies: dict[str, Any]) -> RestaurantRules:

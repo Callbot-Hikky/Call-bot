@@ -12,10 +12,16 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, time
+from typing import Any
 
 from hikky.ports.language_model import LanguageModelPort
 
 logger = logging.getLogger("hikky.answerer")
+# Les questions auxquelles le bot n'a pas pu répondre : à relire pour enrichir
+# les attributs du restaurant côté backend. Aucune route de rappel n'existe
+# aujourd'hui (voir `call_ingest_adapter.create_callback_request`), on ne
+# promet donc rien au client — on trace.
+sans_reponse = logging.getLogger("hikky.questions_sans_reponse")
 
 _JOURS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
 _MOIS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet",
@@ -28,13 +34,18 @@ HORAIRES :
 {hours}
 
 CAPACITÉ : {capacity} couverts, groupes de {max_group} personnes maximum.
+{address}
+CE QUE PROPOSE LE RESTAURANT :
+{facts}
 
 RÉSERVATION EN COURS :
 {known}
 
-Le client vient de te poser une question. Réponds-y en UNE phrase courte, \
-naturelle, à partir des informations ci-dessus. Si tu ne sais pas, dis-le \
-simplement. Dis les dates et heures en toutes lettres, jamais en chiffres.
+Le client vient de te poser une question. Réponds-y en UNE phrase courte \
+(quinze mots maximum), naturelle, uniquement à partir des informations \
+ci-dessus. Si la réponse n'y figure pas, dis exactement : « Je n'ai pas \
+cette information. » Dis les dates et heures en toutes lettres, jamais en \
+chiffres.
 
 IMPORTANT : la réservation ci-dessus n'est PAS encore enregistrée. Ne dis \
 JAMAIS qu'elle est confirmée, réservée, notée, validée ou enregistrée, et \
@@ -47,14 +58,35 @@ Réponds uniquement par la phrase à dire, sans JSON ni commentaire."""
 # n'est créée ici. Toute affirmation qu'elle est faite est donc FAUSSE par
 # construction. Observé en appel réel : « votre réservation est confirmée pour
 # ce soir à vingt et une heures sous le nom Général » — rien n'était réservé.
+#
+# La garde vise la RÉSERVATION (ou la table, le créneau), pas le verbe
+# « confirmer » en soi : « Oui, je vous confirme que nous avons une terrasse »
+# est une réponse légitime et ne doit pas finir en « Je comprends. ».
 _FAUSSE_CONFIRMATION = re.compile(
-    r"\b(r[ée]servation (est |a [ée]t[ée] )?(confirm|enregistr|not[ée]|valid|prise|faite)\w*|"
-    r"est confirm\w*|c'est (not[ée]|r[ée]serv[ée]|enregistr[ée]|confirm[ée])|"
-    r"bien not[ée]|j'ai (not[ée]|r[ée]serv[ée]|enregistr[ée]|confirm[ée])|"
-    r"je (vous )?confirme|est r[ée]serv[ée]e?)\b",
+    r"\b((r[ée]servation|table|cr[ée]neau|demande)\w* (est |a [ée]t[ée] |sera )?(bien )?"
+    r"(confirm|enregistr|not[ée]|valid|pris|fait|r[ée]serv)\w*|"
+    r"c'est (not[ée]|r[ée]serv[ée]|enregistr[ée])\w*|"
+    r"bien not[ée]|j'ai (not[ée]|r[ée]serv[ée]|enregistr[ée]|confirm[ée])\w*|"
+    r"je (vous )?confirme(?! que)|"
+    r"vous (êtes|etes) (attendus?|inscrits?)\b)",
     re.IGNORECASE,
 )
 _REPONSE_SURE = "Je comprends."
+
+# Le modèle ne sait pas : au téléphone, « je n'ai pas d'information concernant
+# l'halal de notre restaurant, je vous conseille de contacter notre gérant pour
+# plus de détails » (observé) est trop long et laisse l'appelant sans issue.
+# On remplace par une phrase courte, honnête, qui indique où obtenir la
+# réponse ; `_ensure_progress` enchaîne ensuite sur la réservation.
+_SANS_INFORMATION = re.compile(
+    r"je n'ai pas (cette |d'|l'|de |d'autres? )?(information|info|détail|precision|précision)|"
+    r"je ne (sais|dispose|connais|peux pas (vous )?(dire|répondre|renseigner))|"
+    r"je n'en sais|pas (en mesure|capable) de|aucune information|je l'ignore",
+    re.IGNORECASE,
+)
+_REPONSE_INCONNUE = (
+    "Je n'ai pas cette information, l'équipe pourra vous renseigner sur place."
+)
 
 
 class QuestionAnswerer:
@@ -69,11 +101,14 @@ class QuestionAnswerer:
         self._llm = llm
 
     async def answer(self, *, user_text, intent, context, history) -> str:
+        adresse = getattr(context, "address", None)
         system = ANSWER_PROMPT.format(
             name=context.name,
             hours=_format_hours(context),
             capacity=context.total_capacity,
             max_group=context.rules.max_group_size,
+            address=f"\nADRESSE : {adresse}\n" if adresse else "",
+            facts=_format_facts(getattr(context, "attributes", None)),
             known=_format_known(intent),
         )
         messages = [
@@ -94,6 +129,9 @@ class QuestionAnswerer:
             # l'appelant (_ensure_progress) enchaîne sur le slot manquant.
             logger.warning("answerer a annoncé une réservation inexistante — neutralisé: %r", texte)
             return _REPONSE_SURE
+        if _SANS_INFORMATION.search(texte):
+            sans_reponse.warning("question sans réponse : %r (modèle : %r)", user_text, texte)
+            return _REPONSE_INCONNUE
         return texte
 
 
@@ -107,6 +145,79 @@ def _format_hours(context) -> str:
     for day in sorted(closed):
         lines.append(f"- {_JOURS[day]} : FERMÉ")
     return "\n".join(lines)
+
+
+# Libellés parlés des clés déclarées par le backend (`restaurants.attributes`).
+# Une clé inconnue est lue telle quelle, soulignés remplacés par des espaces :
+# le restaurateur peut déclarer n'importe quoi sans changement de schéma.
+_LIBELLES: dict[str, str] = {
+    "halal": "halal",
+    "casher": "casher",
+    "kosher": "casher",
+    "vegan": "options véganes",
+    "vegetarian": "options végétariennes",
+    "bio": "produits bio",
+    "gluten_free": "options sans gluten",
+    "terrace": "terrasse",
+    "rooftop": "rooftop",
+    "wifi": "wifi",
+    "high_chairs": "chaises hautes pour enfants",
+    "pets_allowed": "animaux acceptés",
+    "private_parking": "parking privé",
+    "air_conditioning": "climatisation",
+    "wheelchair_accessible": "accès fauteuil roulant",
+    "delivery": "livraison",
+    "takeaway": "vente à emporter",
+    "cash_only": "paiement uniquement en espèces",
+    "card_payment": "paiement par carte bancaire",
+    "meal_vouchers": "tickets restaurant acceptés",
+    "reservation_recommended": "réservation recommandée",
+    "ambiance": "ambiance",
+    "price_range": "gamme de prix",
+    "cuisine_type": "type de cuisine",
+}
+_GAMMES_DE_PRIX = {
+    "€": "économique",
+    "€€": "prix modérés",
+    "€€€": "haut de gamme",
+    "€€€€": "très haut de gamme",
+}
+
+
+def _format_facts(attributes: Any) -> str:
+    """Les attributs du restaurant, à plat et en français prononçable.
+
+    Le JSON du backend est groupé (`dietary`, `equipments`…) ; le modèle n'a
+    pas besoin des groupes, seulement des faits : « - terrasse : oui ».
+    """
+    lignes: list[str] = []
+    for cle, valeur in _aplatir(attributes):
+        libelle = _LIBELLES.get(cle, cle.replace("_", " "))
+        if isinstance(valeur, bool):
+            texte = "oui" if valeur else "non"
+        elif isinstance(valeur, (list, tuple, set)):
+            texte = ", ".join(str(v) for v in valeur if v is not None and str(v).strip())
+        elif valeur is None:
+            continue
+        else:
+            texte = str(valeur).strip()
+        if cle == "price_range":
+            texte = _GAMMES_DE_PRIX.get(texte, texte)
+        if texte:
+            lignes.append(f"- {libelle} : {texte}")
+    return "\n".join(lignes) if lignes else "- (aucune information supplémentaire)"
+
+
+def _aplatir(valeur: Any) -> list[tuple[str, Any]]:
+    if not isinstance(valeur, dict):
+        return []
+    plat: list[tuple[str, Any]] = []
+    for cle, v in valeur.items():
+        if isinstance(v, dict):
+            plat.extend(_aplatir(v))
+        else:
+            plat.append((str(cle), v))
+    return plat
 
 
 def _date_fr(day: date) -> str:
