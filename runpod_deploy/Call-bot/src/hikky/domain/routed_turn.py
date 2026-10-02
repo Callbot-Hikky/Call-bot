@@ -260,7 +260,7 @@ async def run_routed_turn(
             context=session.context,
             history=history,
         )
-        reply = _ensure_progress(reply, session.intent, recent_phrasings)
+        reply = _ensure_progress(reply, session.intent, recent_phrasings, history)
         await _remember(history, user_text, reply)
         await speak(reply)
         return TurnOutcome(
@@ -328,19 +328,42 @@ async def run_routed_turn(
     )
 
 
-def _ensure_progress(
-    reply: str, intent: Any, recent: set[str] | None
-) -> str:
-    """Après avoir répondu au client, on relance sur ce qui manque.
+def _reservation_engagee(intent: Any) -> bool:
+    """Le client a-t-il commencé une réservation (au moins un créneau connu) ?"""
+    from hikky.domain.question_router import SLOT_ORDER
 
-    Sans ça, une réponse comme « Nous sommes fermés le dimanche. » laisse
-    la conversation en suspens.
+    return len(intent.missing_slots()) < len(SLOT_ORDER)
+
+
+def _ensure_progress(
+    reply: str,
+    intent: Any,
+    recent: set[str] | None,
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    """Après avoir répondu au client, reprendre la réservation — seulement si
+    elle est engagée, et sans insister.
+
+    Observé en appel réel : « à chaque fin de réponse l'IA me casse la tête
+    pour réserver une table ». Un appelant qui ne fait que se renseigner
+    recevait une relance commerciale après CHAQUE réponse. Règles :
+    - aucun créneau connu → on répond, point ; c'est au client de dire s'il
+      veut réserver (la salutation l'a déjà invité à parler) ;
+    - réservation en cours → on reprend sur ce qui manque, mais jamais deux
+      fois de suite : si notre phrase précédente était déjà une question et
+      que le client en pose une autre, on répond seulement.
     """
     reply = (reply or "").strip()
     if not reply:
         reply = "Pardon, pouvez-vous répéter ?"
     if reply.rstrip().endswith("?"):
         return reply
+    if not _reservation_engagee(intent):
+        return reply
+    if history:
+        derniere = history[-1]
+        if derniere.get("role") == "assistant" and derniere.get("content", "").rstrip().endswith("?"):
+            return reply
     missing = intent.missing_slots()
     from hikky.domain.question_router import SLOT_ORDER
 
