@@ -47,6 +47,17 @@ def test_restaurant_context_rejects_empty_opening_hours():
         _sample_context(opening_hours=[])
 
 
+def test_attributes_default_to_empty_and_address_to_none():
+    ctx = _sample_context()
+    assert ctx.attributes == {}
+    assert ctx.address is None
+
+
+def test_attributes_are_kept_verbatim():
+    ctx = _sample_context(attributes={"dietary": {"halal": True}})
+    assert ctx.attributes["dietary"]["halal"] is True
+
+
 def test_is_open_at_returns_true_inside_hours():
     ctx = _sample_context()
     assert ctx.is_open_at(datetime(2026, 6, 22, 20, 0)) is True

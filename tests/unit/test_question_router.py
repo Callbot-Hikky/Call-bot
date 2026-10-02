@@ -51,6 +51,95 @@ def test_repeat_request_is_routed_to_the_model():
     assert d.action is Action.ANSWER_QUESTION
 
 
+# ── Questions hors parcours, formulees a l'oral (sortie STT, sans « ? ») ──
+#
+# Bug client : « est-ce que le restaurant est halal ? », « vous avez une
+# terrasse ? » restaient sans reponse. Transcriptions reelles relevees dans
+# /workspace/stt.log : le « oui »/« non » de politesse en tete ou « est ce
+# que » sans tiret suffisaient a rater la question.
+
+import pytest
+
+from hikky.domain.question_router import is_client_question
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # Transcriptions reelles (stt.log du pod).
+        "Bonjour, je voulais vous demander est-ce que votre restaurant il est halage?",
+        "Bonjour et je voulais vous demander est ce que votre restaurant Halal",
+        "Oui, bonjour, je voulais savoir est ce que revient de Halal? ",
+        "Non, non, je voulais vous poser la question, c'est quoi l'ambiance du restaurant s'il vous plaît? ",
+        "Est-ce qu'il y a une terrasse? ",
+        # Tournures orales sans point d'interrogation.
+        "vous avez une terrasse",
+        "c'est halal",
+        "le restaurant est halal",
+        "vous faites des plats végétariens",
+        "il y a un parking",
+        "vous acceptez les chiens",
+        "on peut venir avec un chien",
+        "c'est cher",
+        "vous acceptez les tickets resto",
+        "vous avez un menu enfant",
+        "vous êtes ouverts le dimanche",
+        "vous faites à emporter",
+        "euh vous avez des options sans gluten",
+        "oui et vous avez une terrasse",
+        "c'est où exactement",
+    ],
+)
+def test_oral_question_without_question_mark_is_detected(phrase):
+    assert is_client_question(phrase), phrase
+    assert route_turn(ReservationIntent(), phrase, False).action is Action.ANSWER_QUESTION
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "oui",
+        "Oui, c'est cela.",
+        "Ouais, à peu près",
+        "non",
+        "Non, pour Ryan.",
+        "pour quatre personnes",
+        "demain à 20 heures",
+        "J'aimerais avoir une table pour ce soir à vingt heures.",
+        "Je voudrais réserver pour demain.",
+        "il y a quatre personnes",
+        "on sera quatre avec deux enfants",
+        "Ça fera au nom de Ryan.",
+        "Merci, ma belle.",
+        "soixante-dix personnes",
+        "voilà",
+        "Dupont",
+    ],
+)
+def test_plain_answers_are_not_questions(phrase):
+    assert not is_client_question(phrase), phrase
+
+
+def test_agreement_with_pending_confirmation_still_books_despite_polite_prefix():
+    assert route_turn(_complet(), "Oui oui, c'est bon pour moi", True).action is Action.BOOK
+
+
+def test_refusal_with_pending_confirmation_still_corrects():
+    assert route_turn(_complet(), "Non, pour Ryan", True).action is Action.CORRECT
+
+
+def test_question_while_awaiting_confirmation_is_answered_not_booked():
+    """« Oui, et vous avez une terrasse ? » : on repond, on ne reserve pas a l'aveugle."""
+    d = route_turn(_complet(), "Oui, et vous avez une terrasse ?", True)
+    assert d.action is Action.ANSWER_QUESTION
+
+
+def test_slot_answer_with_polite_prefix_stays_on_track():
+    intent = ReservationIntent().with_date(date(2026, 7, 22)).with_time(time(12))
+    d = route_turn(intent, "Oui, bonjour, pour quatre personnes", False)
+    assert d.action is Action.ASK_SLOT
+
+
 # ── Collecte pilotee par le code ────────────────────────────────────────
 
 
