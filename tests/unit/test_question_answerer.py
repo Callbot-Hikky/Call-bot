@@ -126,6 +126,19 @@ async def test_une_base_trop_lente_ne_fait_pas_attendre_le_client():
     assert "Arrive après le délai." not in _prompt(llm)
 
 
+async def test_le_seuil_par_defaut_separe_les_scores_mesures_sur_le_site():
+    # Chèques vacances (0,34) ne doit pas passer ; « s'en griller une » (0,49) doit.
+    llm = FakeLanguageModel(["INCONNU", "Oui, deux coins fumeurs."])
+    hors_sujet = FakeKnowledge([KnowledgePassage("Coin fumeur", "Deux coins fumeurs.", 0.34)])
+    a_propos = FakeKnowledge([KnowledgePassage("Coin fumeur", "Deux coins fumeurs.", 0.49)])
+
+    await _repondre(QuestionAnswerer(llm, knowledge=hors_sujet), "Des chèques vacances ?")
+    await _repondre(QuestionAnswerer(llm, knowledge=a_propos), "On peut s'en griller une ?")
+
+    assert "Deux coins fumeurs." not in llm.calls[0][0]["content"]
+    assert "Deux coins fumeurs." in llm.calls[1][0]["content"]
+
+
 async def test_un_passage_long_est_tronque():
     llm = FakeLanguageModel(["D'accord."])
     base = FakeKnowledge([KnowledgePassage("Carte", "x" * 2000, 0.9)])

@@ -78,9 +78,16 @@ REPLY_UNKNOWN = "Je n'ai pas cette information, l'équipe pourra vous renseigner
 _REPONSE_INCONNUE = REPLY_UNKNOWN
 
 # En dessous, le passage ne parle sans doute pas de la question : on ne le
-# montre pas au modèle, qui s'en servirait pour répondre à côté. Valeur de
-# départ, à ajuster sur de vrais appels.
-DEFAULT_MIN_SCORE = 0.35
+# montre pas au modèle, qui s'en servirait pour répondre à côté.
+#
+# Mesuré sur le site, une entrée « coin fumeur », embeddings voyage-4-lite :
+#
+#     hors sujet   chèques vacances 0,34 · vestiaire 0,29 · plat du jour 0,07
+#     à propos     « s'en griller une » 0,49 · fumer dehors 0,63 · espace fumeurs 0,62
+#
+# 0,35 laissait passer les chèques vacances à un point près. 0,42 est au
+# milieu de l'écart. À remesurer quand la base contiendra plus d'entrées.
+DEFAULT_MIN_SCORE = 0.42
 
 # Le client attend au téléphone : passé ce délai, on répond sans la base
 # plutôt que de laisser un blanc.

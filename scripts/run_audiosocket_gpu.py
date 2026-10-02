@@ -11,7 +11,7 @@ Destiné à la machine GPU (RunPod). Variables d'environnement :
     HIKKY_LLAMA_N_GPU_LAYERS -1
     HIKKY_TTS_SAMPLE_RATE    22050
     HIKKY_AUDIOSOCKET_PORT   6666
-    HIKKY_KNOWLEDGE_MIN_SCORE 0.35  score minimal pour montrer un passage au modèle
+    HIKKY_KNOWLEDGE_MIN_SCORE 0.42  score minimal pour montrer un passage au modèle
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from hikky.adapters.voice.faster_whisper_stt import FasterWhisperSTTAdapter
 from hikky.adapters.voice.llama_cpp_llm import LlamaCppLLMAdapter
 from hikky.adapters.voice.piper_tts import PiperTTSAdapter
 from hikky.adapters.voice.xtts_tts import XttsTTSAdapter
-from hikky.domain.conversation_brain import QuestionAnswerer
+from hikky.domain.conversation_brain import DEFAULT_MIN_SCORE, QuestionAnswerer
 from hikky.domain.phraseur import Phraseur
 from hikky.pipeline.llm_slot_extractor import LLMSlotExtractor
 
@@ -160,7 +160,9 @@ async def main() -> None:
         answerer=QuestionAnswerer(
             llm,
             knowledge=knowledge_port,
-            min_score=float(os.environ.get("HIKKY_KNOWLEDGE_MIN_SCORE", "0.35")),
+            min_score=float(
+                os.environ.get("HIKKY_KNOWLEDGE_MIN_SCORE", str(DEFAULT_MIN_SCORE))
+            ),
         ),
         phraseur=Phraseur(llm),
     )
