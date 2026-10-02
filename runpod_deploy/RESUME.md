@@ -100,6 +100,21 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     aucun créneau connu → on répond, point ; réservation en cours → on reprend sur ce qui
     manque, mais jamais deux fois de suite (si notre phrase précédente était déjà une
     question). Appliqué aux 2 copies de routed_turn.py (repo + runpod_deploy). 90 tests.
+14. **Recherche voix & ton téléphone (2026-10-02, sourcée)** : AUCUNE des 9 voix CustomVoice
+    n'est française native (5 zh, 2 en, 1 ja, 1 ko) → plafond d'accent structurel. Seules
+    `ryan` (homme, en) et `vivian` (femme, zh) ont des retours francophones « tient le
+    français d'un bout à l'autre » ; `serena` DÉRIVE vers l'anglais (cross-lingual, elle est
+    chinoise) ; `ono_anna` : zéro retour positif en fr, un négatif → à retirer. Reco : ryan
+    n°1, vivian n°2 (la chaleur perçue compte plus que le genre). TON AU TÉLÉPHONE : la
+    bande étroite dégrade surtout la JOIE (80 %→58 % reconnue) → sobriété, pas d'enthousiasme
+    marqué ; confirmation « chaleureuse et sûre, posée », intonation DESCENDANTE (crédibilité) ;
+    excuses basses/lentes en assumant ; registre fr = retenue. `subtalker_dosample=True` est
+    le RÉGLAGE OFFICIEL Qwen (greedy = « trames quasi-silencieuses répétées », non supporté)
+    → garder fastS, borner la génération. Vraie voix fr native = FINE-TUNING d'un speaker
+    CustomVoice (30-60 min audio consenti/LibriVox, lr 2e-6) qui GARDE `instruct` ; le clonage
+    zero-shot Base perd `instruct` et est instable → pas pour la prod. Légal : consentement
+    écrit (RGPD art. 9, C. pén. 226-8-1), marquage AI Act art. 50. Test décisif : 4 voix × 8
+    phrases, rendu téléphone, WER via NOTRE STT + écoute aveugle → `/workspace/voice_lab/`.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
