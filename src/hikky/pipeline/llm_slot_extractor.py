@@ -189,7 +189,7 @@ _VAGUE_PERIOD = re.compile(
 )
 # Une heure réellement énoncée : un chiffre, ou « midi »/« minuit » (qui SONT
 # des heures valides et doivent, eux, être conservés).
-_EXPLICIT_HOUR = re.compile(r"\d|\bmidi\b|\bminuit\b", re.IGNORECASE)
+_EXPLICIT_HOUR = re.compile(r"\d|\bmidi\b|\bminuit\b|\bheures?\b", re.IGNORECASE)
 
 
 # Jours de la semaine : on résout le jour nommé nous-mêmes plutôt que de

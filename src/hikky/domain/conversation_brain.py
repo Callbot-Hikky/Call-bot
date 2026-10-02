@@ -10,6 +10,7 @@ chargé de dizaines de contraintes.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, time
 
 from hikky.ports.language_model import LanguageModelPort
@@ -35,7 +36,25 @@ Le client vient de te poser une question. Réponds-y en UNE phrase courte, \
 naturelle, à partir des informations ci-dessus. Si tu ne sais pas, dis-le \
 simplement. Dis les dates et heures en toutes lettres, jamais en chiffres.
 
+IMPORTANT : la réservation ci-dessus n'est PAS encore enregistrée. Ne dis \
+JAMAIS qu'elle est confirmée, réservée, notée, validée ou enregistrée, et \
+n'annonce aucune réservation. Tu réponds seulement à la question.
+
 Réponds uniquement par la phrase à dire, sans JSON ni commentaire."""
+
+
+# `answer()` n'est appelé que hors parcours de réservation : aucune réservation
+# n'est créée ici. Toute affirmation qu'elle est faite est donc FAUSSE par
+# construction. Observé en appel réel : « votre réservation est confirmée pour
+# ce soir à vingt et une heures sous le nom Général » — rien n'était réservé.
+_FAUSSE_CONFIRMATION = re.compile(
+    r"\b(r[ée]servation (est |a [ée]t[ée] )?(confirm|enregistr|not[ée]|valid|prise|faite)\w*|"
+    r"est confirm\w*|c'est (not[ée]|r[ée]serv[ée]|enregistr[ée]|confirm[ée])|"
+    r"bien not[ée]|j'ai (not[ée]|r[ée]serv[ée]|enregistr[ée]|confirm[ée])|"
+    r"je (vous )?confirme|est r[ée]serv[ée]e?)\b",
+    re.IGNORECASE,
+)
+_REPONSE_SURE = "Je comprends."
 
 
 class QuestionAnswerer:
@@ -68,7 +87,14 @@ class QuestionAnswerer:
             logger.warning("réponse hors script échouée", exc_info=True)
             return "Pardon, pouvez-vous répéter ?"
         texte = (raw or "").strip()
-        return texte if texte and len(texte) < 400 else "Pardon, pouvez-vous répéter ?"
+        if not texte or len(texte) >= 400:
+            return "Pardon, pouvez-vous répéter ?"
+        if _FAUSSE_CONFIRMATION.search(texte):
+            # Fausse confirmation : on ne la prononce jamais. Réponse neutre ;
+            # l'appelant (_ensure_progress) enchaîne sur le slot manquant.
+            logger.warning("answerer a annoncé une réservation inexistante — neutralisé: %r", texte)
+            return _REPONSE_SURE
+        return texte
 
 
 def _format_hours(context) -> str:
