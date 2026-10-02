@@ -76,6 +76,24 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     courte + log `hikky.questions_sans_reponse`. 279 tests verts. Limites : le menu
     (`restaurant_menus`) n'est pas exposé par `/api/calls/context` ; pas de rappel client tant
     que le backend n'a pas de route de callback.
+12. **Émotions TTS, labo mesuré (2026-10-02, 150 synthèses, `/workspace/emotion_lab/`)** :
+    Qwen3-TTS suit bien une instruction `instruct` par phrase. Verdicts : (a) `fastS` =
+    sous-talker ÉCHANTILLONNÉ dans le graphe (Gumbel-max, `torch.multinomial` non capturable)
+    ramène l'expressivité au niveau de la référence pour +2 % de RTF (0,38 vs 1,62) et est
+    plus stable que le greedy → classe `SampledPredictorGraph` dans `emotion_lab/lab.py`
+    (25 lignes) ; (b) le gain est PAR INTENTION : confirmation enthousiaste (+32 Hz, F0 std
+    2,8→4,0 st) et patience, pas sur la demande ; (c) l'instruction FRANÇAISE « enjouée »
+    SUR-JOUE et déstabilise l'accueil (50 % de runs 1,5-2,2× trop longs) → pour l'accueil,
+    instruction en ANGLAIS (0 run anormal) ; (d) l'excuse doit être PLUS basse/douce (F0 std
+    qui baisse = effet voulu) ; (e) aucune limite de prefill : 134 tokens OK (vraie limite
+    prefill+160 ≤ 1024) ; (f) l'émotion survit au téléphone (±0,1 st).
+    ⚠ `ono_anna` est une voix JAPONAISE selon la fiche officielle (plafond de qualité fr
+    indépendant de l'émotion) ; alternative à tester : `vivian`. Plan d'intégration minimal :
+    `Req.emotion/instruct` + dict EMOTIONS avec repli = comportement actuel ; flag
+    `TTS_SUBTALKER_SAMPLE=1` pour fastS ; orchestrateur : salutation cachée en « accueil »
+    + garde durée (>6,5 s → regénérer), re-prompts → patience/excuse, classement par texte
+    des réponses fixes (« C'est réservé »→confirmation, « Pardon »→excuse, « pas
+    disponible »→indispo, « C'est bien cela ? »→recap). Échantillons : `emotion_lab/best/`.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
