@@ -42,6 +42,27 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
 6. **Brièveté** : récap sans préambule + sans jour de semaine, clôture courte
    (`routed_turn.py`), `SIL_FRAMES=25` (fin de parole 0,5 s).
 7. Latence tour de parole : **~15-20 s → ~2-5 s**. Réservation complète OK end-to-end.
+8. **Dialogue (2026-10-02)** : le code ne contredit plus le modèle, et le modèle ne peut
+   plus affirmer un état. `_EXPLICIT_HOUR` reconnaît « vingt et une heures » (avant :
+   l'heure correctement extraite par Qwen était JETÉE par `_drop_invented_time`).
+   Phraseur : une demande de slot doit être une question sans vocabulaire d'affirmation
+   (sinon repli figé) — il avait sorti « Je confirme 21h ? ». Answerer : ne peut jamais
+   annoncer une réservation faite (garde `_FAUSSE_CONFIRMATION`) — il avait inventé
+   « confirmée sous le nom Général ».
+9. **Front-end audio STT, plan A (2026-10-02)** : la recherche (*Beyond Fresh Starts*,
+   Nemotron en agent VAD) montre un WER du 1er mot de 51 % quand chaque clip démarre à
+   froid et que le VAD énergie rogne l'attaque. Correctifs : pré-roll **400 ms d'audio
+   réel** avant le seuil, silence en tête supprimé, silence en queue **1,0 s** (vidage du
+   lookahead Nemotron), rééchantillonnage 8→16 kHz **soxr HQ** (repli ratecv),
+   `MIN_SPEECH` 240 ms (pas 500 : ça jetterait « oui »). Diagnostic STT : 4/11
+   transcriptions fausses quand le texte est juste, Qwen comprend du 1er coup.
+   Si ça ne suffit pas → **plan B** : A/B `faster_whisper` large-v3 (adaptateur dans le
+   repo, fr 5,5 % WER vs 9,0 % Nemotron, robuste 8 kHz).
+10. **Verrou TTS (2026-10-02)** : un stream abandonné (raccrochage en pleine phrase)
+    laissait le verrou CUDA-graph tenu pour toujours → TTS muet (TTFA 67 s… 889 s en
+    file). `/synthesize_stream` = générateur async + thread + drapeau d'arrêt, verrou rendu
+    en `finally` ; acquisition avec timeout 10 s → 503 (plus 60 s de silence) ;
+    `/health` expose `lock_held_s` / `lock_stuck`. Prouvé sur vrai uvicorn + socket coupé.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
@@ -56,6 +77,20 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
 - **rtk avale la sortie** quand un job est backgroundé dans la commande SSH → lancer
   détaché puis vérifier dans des commandes séparées (lire les logs).
 - Salutation cachée au boot de l'orchestrateur (via TTS) → TTS doit être prêt avant.
+  `run_telnyx.sh` lance les 3 en même temps → la salutation échoue (« cache salutation
+  echoue ») : relancer l'orchestrateur seul une fois le TTS prêt.
+- **TTS muet / salutation en ReadTimeout alors que `/health` est OK** = verrou bloqué.
+  Vérifier `curl localhost:8802/health` → `lock_held_s` qui grimpe / `lock_stuck:true`.
+  Diagnostic sans deviner : `kill -USR1 <pid tts>` → piles de tous les threads dans
+  `tts.log` (faulthandler). Remède : relancer le TTS par PID, puis l'orchestrateur.
+- `runpod_deploy/` est **superposé** au repo lors d'un rebuild (3 fichiers domaine +
+  services) : tout correctif dans `src/hikky/domain/{phraseur,conversation_brain,
+  routed_turn}.py` doit aussi être recopié dans `runpod_deploy/`, sinon le prochain
+  rebuild l'écrase. (Le `routed_turn.py` du repo n'a PAS les raccourcissements récap/
+  clôture qui tournent sur le pod — seule la copie `runpod_deploy/` les a.)
+- `run_telnyx.sh` de la sauvegarde n'a pas de `PUBLIC_HOST` : l'ajouter à la ligne
+  orchestrateur à chaque nouveau pod (`export PUBLIC_HOST=<podid>-19123.proxy.runpod.net`),
+  sinon le TeXML pointe sur l'ancien pod.
 
 ## Fichiers de ce dossier (= ce qui tourne sur le pod)
 - `services/telnyx_bot.py` — orchestrateur (WS Telnyx, A-law, streaming speak, robustesse)
