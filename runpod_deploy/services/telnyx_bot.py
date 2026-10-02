@@ -5,6 +5,11 @@ Reutilise le domaine Call-bot (run_routed_turn, reservation backend), LLM Qwen 3
 Reconstruit 2026-09-16 sur nouveau pod. Voix ona, codec A-law entrant, salutation cachee,
 reponses courtes, re-prompt de confirmation."""
 import os, sys, json, base64, asyncio, audioop, time, logging
+try:  # reechantillonnage 8k->16k de qualite (polyphase). audioop.ratecv = interpolation
+    import numpy as _np  # grossiere (et audioop disparait en Python 3.13).
+    import soxr as _soxr
+except Exception:  # noqa: BLE001 - repli silencieux, l'appel ne doit jamais casser
+    _soxr = None
 import httpx
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
@@ -33,8 +38,8 @@ RESTO_PHONE = os.environ.get("HIKKY_RESTAURANT_PHONE", "+33472100100")
 GGUF = "/workspace/models/Qwen2.5-32B-Instruct-Q5_K_M.gguf"
 
 THRESH = 800
-SIL_FRAMES = 25          # 800 ms de silence avant de cloturer un tour
-MIN_SPEECH = 8           # min ~160 ms de parole pour un tour
+SIL_FRAMES = 25          # 500 ms de silence (hangover) avant de cloturer un tour
+MIN_SPEECH = 12          # min ~240 ms de parole : filtre les blips, garde 'oui'/'non'
 BARGE_THRESH = 2500      # parole soutenue nettement au-dessus du bruit de ligne
 BARGE_MIN_FRAMES = 12    # ~240 ms continus avant de couper le bot
 
@@ -96,6 +101,15 @@ async def inbound(_: Request):
     return Response(content=xml, media_type="application/xml")
 
 
+def _to16k(pcm8k: bytes) -> bytes:
+    # Entree STT : 8 kHz telephone -> 16 kHz. soxr HQ si dispo, sinon ratecv.
+    if _soxr is not None:
+        x = _np.frombuffer(pcm8k, dtype="<i2")
+        return _soxr.resample(x, 8000, 16000, quality="HQ").astype("<i2").tobytes()
+    out, _ = audioop.ratecv(pcm8k, 2, 1, 8000, 16000, None)
+    return out
+
+
 def pcm_to_ulaw_frames(pcm: bytes, sr: int):
     # 24k -> 8k puis mu-law sortant (Telnyx transcode vers l'appel A-law).
     pcm8, _ = audioop.ratecv(pcm, 2, 1, sr, 8000, None)
@@ -130,8 +144,8 @@ async def stream(ws: WebSocket):
     silence = 0
     speech = 0
     bargein = 0
-    preroll = bytearray()   # ~200ms d'audio avant l'attaque (evite de couper la 1re syllabe)
-    PREROLL_BYTES = 3200    # 0.2s @ 8kHz PCM16
+    preroll = bytearray()   # ~400ms d'audio REEL avant l'attaque (le VAD energie rogne le 1er mot)
+    PREROLL_BYTES = 6400    # 0.4s @ 8kHz PCM16
 
     async def send_ulaw(frames):
         # Telnyx bufferise et joue lui-meme ; 1 message media / seconde max.
@@ -205,9 +219,10 @@ async def stream(ws: WebSocket):
 
     async def do_turn(buf: bytes):
         nonlocal awaiting
-        buf16, _ = audioop.ratecv(buf, 2, 1, 8000, 16000, None)
-        _pad = b"\x00" * (16000 * 2 * 2 // 5)   # ~0.4s de silence 16kHz (contexte encodeur)
-        buf16 = _pad + buf16 + _pad
+        buf16 = _to16k(buf)
+        # Silence en QUEUE seulement : vide le contexte droit (lookahead) de Nemotron.
+        # En tete c'est inutile - l'attaque est couverte par le pre-roll d'audio reel.
+        buf16 = buf16 + b"\x00" * (16000 * 2)   # 1.0s @ 16kHz
         text = await transcribe(buf16)
         if not text:
             # STT vide : ne jamais rester muet -> redemander (adapte au contexte).
