@@ -63,6 +63,19 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     file). `/synthesize_stream` = générateur async + thread + drapeau d'arrêt, verrou rendu
     en `finally` ; acquisition avec timeout 10 s → 503 (plus 60 s de silence) ;
     `/health` expose `lock_held_s` / `lock_stuck`. Prouvé sur vrai uvicorn + socket coupé.
+11. **Questions hors parcours (2026-10-02)** : « est-ce que c'est halal ? », « vous avez une
+    terrasse ? » restaient sans réponse. Cause racine PROUVÉE (log + `curl /api/calls/context`) :
+    le backend renvoie déjà `attributes` (dietary.halal, equipments.terrace, vegetarian,
+    gluten_free, pets_allowed, private_parking, meal_vouchers, price_range, ambiance,
+    cuisine_type…) et `backend_restaurant_context._to_context` les JETAIT. 2e cause :
+    `is_client_question` court-circuité par « oui, bonjour… » en tête et aveugle à « est ce
+    que » sans tiret / tournures orales sans « ? ». Correctif : attributs transmis dans
+    `RestaurantContext.attributes` et lus par l'answerer (section « CE QUE PROPOSE LE
+    RESTAURANT »), détecteur réécrit (normalisation STT, interjections ignorées, tournures
+    fortes + faibles conditionnées à un thème restaurant, 0 appel LLM), réponse inconnue
+    courte + log `hikky.questions_sans_reponse`. 279 tests verts. Limites : le menu
+    (`restaurant_menus`) n'est pas exposé par `/api/calls/context` ; pas de rappel client tant
+    que le backend n'a pas de route de callback.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
@@ -91,6 +104,9 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
 - `run_telnyx.sh` de la sauvegarde n'a pas de `PUBLIC_HOST` : l'ajouter à la ligne
   orchestrateur à chaque nouveau pod (`export PUBLIC_HOST=<podid>-19123.proxy.runpod.net`),
   sinon le TeXML pointe sur l'ancien pod.
+- Fichiers domaine SANS copie `runpod_deploy/` (viennent du repo au rebuild) :
+  `question_router.py`, `restaurant_context.py`, `adapters/back/backend_restaurant_context.py`.
+  Ceux AVEC copie (superposée) : `phraseur.py`, `conversation_brain.py`, `routed_turn.py`.
 
 ## Fichiers de ce dossier (= ce qui tourne sur le pod)
 - `services/telnyx_bot.py` — orchestrateur (WS Telnyx, A-law, streaming speak, robustesse)
