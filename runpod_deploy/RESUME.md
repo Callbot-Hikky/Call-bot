@@ -94,6 +94,12 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     + garde durée (>6,5 s → regénérer), re-prompts → patience/excuse, classement par texte
     des réponses fixes (« C'est réservé »→confirmation, « Pardon »→excuse, « pas
     disponible »→indispo, « C'est bien cela ? »→recap). Échantillons : `emotion_lab/best/`.
+13. **Plus de relance commerciale systématique (2026-10-02)** : « à chaque fin de réponse l'IA
+    me casse la tête pour réserver ». `_ensure_progress` (routed_turn.py) collait d'office la
+    question du créneau manquant après CHAQUE réponse hors parcours. Règles désormais :
+    aucun créneau connu → on répond, point ; réservation en cours → on reprend sur ce qui
+    manque, mais jamais deux fois de suite (si notre phrase précédente était déjà une
+    question). Appliqué aux 2 copies de routed_turn.py (repo + runpod_deploy). 90 tests.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
