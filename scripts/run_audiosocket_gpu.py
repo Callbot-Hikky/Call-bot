@@ -11,6 +11,7 @@ Destiné à la machine GPU (RunPod). Variables d'environnement :
     HIKKY_LLAMA_N_GPU_LAYERS -1
     HIKKY_TTS_SAMPLE_RATE    22050
     HIKKY_AUDIOSOCKET_PORT   6666
+    HIKKY_KNOWLEDGE_MIN_SCORE 0.35  score minimal pour montrer un passage au modèle
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from hikky.adapters.back.backend_restaurant_context import (
 )
 from hikky.adapters.back.call_ingest_adapter import CallIngestAdapter
 from hikky.adapters.back.http_client import BackHttpClient
+from hikky.adapters.back.knowledge_adapter import BackendKnowledgeAdapter
 from hikky.adapters.telephony.asterisk_audiosocket_server import (
     AudioSocketServerConfig,
     AudioSocketServerDeps,
@@ -123,6 +125,7 @@ async def main() -> None:
     back_url = os.environ.get("HIKKY_BACK_BASE_URL")
     reservation_port = None
     context_port = None
+    knowledge_port = None
     if back_url:
         client = BackHttpClient(
             base_url=back_url,
@@ -138,6 +141,11 @@ async def main() -> None:
         # inventé côté bot ferait échouer toutes les requêtes (Spring
         # renvoie 401 sur un UUID invalide).
         context_port = BackendRestaurantContextAdapter(client)
+        # Ce que le restaurateur a écrit, pour les questions hors réservation.
+        knowledge_port = BackendKnowledgeAdapter(
+            client,
+            restaurant_phone=os.environ.get("HIKKY_RESTAURANT_PHONE", "+33000000000"),
+        )
         logger.info("Back HTTP réel : %s", back_url)
     else:
         logger.warning("HIKKY_BACK_BASE_URL absent — réservations NON enregistrées")
@@ -149,7 +157,11 @@ async def main() -> None:
         stt_adapter=stt,
         tts_adapter=tts,
         slot_extractor=LLMSlotExtractor(llm),
-        answerer=QuestionAnswerer(llm),
+        answerer=QuestionAnswerer(
+            llm,
+            knowledge=knowledge_port,
+            min_score=float(os.environ.get("HIKKY_KNOWLEDGE_MIN_SCORE", "0.35")),
+        ),
         phraseur=Phraseur(llm),
     )
     config = AudioSocketServerConfig(

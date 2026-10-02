@@ -1,6 +1,7 @@
 import pytest
 
 from hikky.ports.call_log import CallLogPort
+from hikky.ports.knowledge import KnowledgePort
 from hikky.ports.language_model import LanguageModelPort
 from hikky.ports.notification import NotificationPort
 from hikky.ports.reservation import ReservationPort
@@ -14,6 +15,7 @@ from hikky.ports.telephony import TelephonyPort
     "port_cls",
     [
         CallLogPort,
+        KnowledgePort,
         LanguageModelPort,
         NotificationPort,
         ReservationPort,

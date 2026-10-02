@@ -200,3 +200,17 @@ async def test_une_panne_du_backend_remonte_telle_quelle():
 
     with pytest.raises(BackUnavailable):
         await _charger(BackUnavailable("GET /api/calls/context: HTTP 503"))
+
+
+async def test_les_attributs_du_restaurant_sont_conserves():
+    # Le backend les envoyait déjà ; le bot les jetait et ne pouvait pas
+    # dire s'il y avait une terrasse.
+    contexte, _ = await _charger(_contexte(attributes={"terrasse": True, "halal": False}))
+
+    assert contexte.attributes == {"terrasse": True, "halal": False}
+
+
+async def test_des_attributs_absents_ou_illisibles_donnent_un_dictionnaire_vide():
+    contexte, _ = await _charger(_contexte(attributes=None))
+
+    assert contexte.attributes == {}
