@@ -115,6 +115,15 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     zero-shot Base perd `instruct` et est instable → pas pour la prod. Légal : consentement
     écrit (RGPD art. 9, C. pén. 226-8-1), marquage AI Act art. 50. Test décisif : 4 voix × 8
     phrases, rendu téléphone, WER via NOTRE STT + écoute aveugle → `/workspace/voice_lab/`.
+    RÉSULTAT (64 synthèses fastS, instructions sobres, juge = STT prod :8801 sur audio tél.) :
+    ryan WER 0,060 / 0 sur-gén / 4,1 st ; ono_anna 0,063 / 0 / 2,9 st (LA PLUS PLATE, −15 %
+    au tél.) ; vivian 0,074 / 1 sur-gén / 4,4 st (LA PLUS EXPRESSIVE) ; serena 0,200 (rejetée
+    — l'oreille du client avait raison). 0 dérive EN avec language=French. ono_anna n'est pas
+    mal comprise : son défaut est la platitude. Choix = persona : féminine → vivian (+ garde-fou
+    durée), sinon ryan. Les 7 instructions SOBRES EN donnent de meilleurs WER que les
+    « enthousiastes » → les utiliser comme table EMOTIONS par défaut. Si la voix change :
+    champ `speaker` optionnel sur l'API TTS + salutation cachée régénérée. Échantillons tél. :
+    `/workspace/voice_lab/best/<voix>__<intention>_tel.wav`.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
