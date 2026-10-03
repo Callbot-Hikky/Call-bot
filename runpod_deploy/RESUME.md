@@ -5,13 +5,20 @@ sur le pod** : ce dossier contient les fichiers exacts qui tournent. Les modèle
 et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
 
 ## Accès au pod
-- Pod ACTUEL : `8b10kksz3ra5iw` (A40 48 Go, image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1`), reconstruit 2026-09-18.
-- SSH direct : `ssh -i ~/.ssh/id_ed25519 root@194.68.245.239 -p 22145`
-  (via rtk : `rtk proxy ssh -i ~/.ssh/id_ed25519 root@194.68.245.239 -p 22145 '<cmd>'`)
+- **AUCUN POD (2026-10-02)** : `hikky-bot-4` (`4syj7wqd2o39x8`) et `hikky-bot-5` (`8b10kksz3ra5iw`)
+  SUPPRIMÉS pour couper la facturation (un pod arrêté facture encore ~24 $/mois de volume).
+  Prochaine session = « Rebuild from scratch » ci-dessous, puis mettre à jour ce bloc
+  (id, IP/port SSH, `PUBLIC_HOST` dans `run_telnyx.sh` — il vaut encore
+  `8b10kksz3ra5iw-19123.proxy.runpod.net`, OBSOLÈTE).
+- Perdu avec le pod : `/workspace/emotion_lab/` et `/workspace/voice_lab/` (scripts et WAV).
+  Les conclusions sont dans les items 12 et 14 ; à regénérer (~10 min) si l'écoute aveugle
+  des voix (vivian / ryan / ono_anna) est encore voulue. Leçon : versionner les labos
+  dans `runpod_deploy/labs/` dès qu'ils produisent un résultat.
+- Dernier pod (`8b10kksz3ra5iw`) pour mémoire : A40 48 Go, image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1`,
+  SSH `ssh -i ~/.ssh/id_ed25519 root@194.68.245.239 -p 22145`, proxy `https://8b10kksz3ra5iw-19123.proxy.runpod.net`.
   Note : sshd peut mettre ~4-5 min à répondre après le démarrage d'un pod neuf.
-- URL publique orchestrateur : `https://8b10kksz3ra5iw-19123.proxy.runpod.net`
-- `PUBLIC_HOST` (env orchestrateur) = `8b10kksz3ra5iw-19123.proxy.runpod.net` (déjà dans run_telnyx.sh).
-- Ancien pod `uv9jklqxm6vwnj` (69.30.85.117:22062) : ARRÊTÉ, jamais pu redémarrer (pas de GPU libre) → d'où ce rebuild. À supprimer quand plus utile.
+- Un pod arrêté ne redémarre souvent PAS (« not enough free GPUs on the host ») → l'interface
+  web permet un démarrage à 0 GPU pour récupérer le volume avant suppression.
 - Port SSH direct peut changer : `runpodctl pod list` + API GraphQL pour les ports
   (`curl "https://api.runpod.io/graphql?api_key=$KEY" -d '{"query":"query{pod(input:{podId:\"uv9jklqxm6vwnj\"}){runtime{ports{ip privatePort publicPort type}}}}"}'`)
 
@@ -123,7 +130,21 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     durée), sinon ryan. Les 7 instructions SOBRES EN donnent de meilleurs WER que les
     « enthousiastes » → les utiliser comme table EMOTIONS par défaut. Si la voix change :
     champ `speaker` optionnel sur l'API TTS + salutation cachée régénérée. Échantillons tél. :
-    `/workspace/voice_lab/best/<voix>__<intention>_tel.wav`.
+    `/workspace/voice_lab/best/<voix>__<intention>_tel.wav`. (Perdus avec le pod, voir « Accès au pod ».)
+15. **Base de connaissances déployée sur staging (2026-10-02, serveur 51.15.210.223)** :
+    PR back #26 (`b82bc4ad`, Flyway V30 `knowledge_base_entries` + `vector(1024)` HNSW) et
+    front #19 (`48f5958f`) fusionnées dans `staging` UNIQUEMENT (`main` intact). Côté serveur,
+    la stack LIVE est `/opt/hikky` (`hikky-*`, DB `hikky-postgres-1`, 60 réservations) — PAS
+    `callbot-*` (ancienne stack, 0 réservation). Postgres passé en `callbot-postgres:16-pgvector`
+    (dumps `~/backup-avant-pgvector*.sql`, compose `docker-compose.yml.bak-avant-pgvector`).
+    Ajouté à la main dans `/opt/hikky/docker-compose.yml` : `VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}`
+    sous `backend.environment` (sauvegarde `.bak-avant-voyage`) — le compose du repo ne pilote
+    PAS cette stack. Secret GitHub `VOYAGE_API_KEY` posé (back démarre « Embeddings: Voyage AI »).
+    Pièges : (a) `deploy.sh` lancé en root rend `images.env` root → le CI (`deploy`) échoue
+    « Permission denied » → `chown deploy:deploy /opt/hikky/*` ; (b) `gh secret set` sans
+    `--body` depuis le shell `!` enregistre une valeur VIDE ; (c) le workflow FRONT réécrit
+    `/opt/hikky/.env` sans `VOYAGE_API_KEY` ni webhooks Discord (bug latent signalé à l'équipe) ;
+    (d) la clé Voyage a transité en clair → à faire tourner.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
