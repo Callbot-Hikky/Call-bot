@@ -251,3 +251,53 @@ def test_une_question_indirecte_ou_mal_entendue_reste_une_question(texte):
 ])
 def test_une_reponse_sur_la_reservation_n_est_pas_une_question(texte):
     assert not is_client_question(texte), texte
+
+
+# ── Phase 0 (2026-10-03) : le routeur reçoit le CONTEXTE ──────────────────────
+# Un accord ou un refus n'a de sens qu'en réponse à une question fermée du bot.
+# Appel réel : « Je vous ai demandé si le restaurant est halal » classé « accord »
+# parce que « si » figurait dans la liste des accords — testé sur toute phrase.
+
+
+def test_si_dans_une_question_indirecte_n_est_pas_un_accord():
+    d = route_turn(ReservationIntent(), "Je vous ai demandé si le restaurant est halal.", False)
+    assert d.action is Action.ANSWER_QUESTION
+
+
+def test_si_seul_en_reponse_a_une_confirmation_est_un_accord():
+    for texte in ("Si.", "si si", "Mais si !"):
+        d = route_turn(_complet(), texte, True)
+        assert d.action is Action.BOOK, texte
+
+
+def test_oui_hors_confirmation_n_est_ni_question_ni_reservation():
+    d = route_turn(ReservationIntent().with_date(date(2026, 10, 4)), "oui", False)
+    assert d.action is Action.ASK_SLOT and d.slot == "time"
+
+
+def test_une_reponse_incertaine_a_la_confirmation_refait_le_recapitulatif():
+    for texte in ("euh, peut-être", "je ne sais pas", "je sais pas trop", "attendez"):
+        d = route_turn(_complet(), texte, True)
+        assert d.action is Action.RECONFIRM, texte
+
+
+def test_une_demande_de_changement_pendant_la_confirmation_est_une_correction():
+    for texte in ("non, plutôt 21 heures", "je voudrais changer l'heure", "modifier le nombre"):
+        d = route_turn(_complet(), texte, True)
+        assert d.action is Action.CORRECT, texte
+
+
+def test_changer_hors_confirmation_n_est_pas_un_refus():
+    # Sans question fermée en attente, « changer » n'a rien à refuser : on continue.
+    d = route_turn(ReservationIntent().with_date(date(2026, 10, 4)), "je voudrais changer de jour", False)
+    assert d.action is not Action.CORRECT
+
+
+@pytest.mark.parametrize("texte", [
+    "Je vous ai demandé si le restaurant est halal.",
+    "Vous avez rien compris, je vous ai demandé si le restaurant est halal.",
+    "J'ai demandé si vous aviez une terrasse.",
+    "Je répète : est-ce que vous avez un parking ?",
+])
+def test_les_questions_repetees_restent_des_questions(texte):
+    assert is_client_question(texte), texte

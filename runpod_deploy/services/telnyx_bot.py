@@ -174,6 +174,7 @@ async def stream(ws: WebSocket):
     turn_lock = asyncio.Lock()
     call_tag = time.strftime("%H%M%S")
     utter_n = 0
+    n_incompris = 0         # énoncés vides consécutifs (remis à zéro dès qu'on comprend)
 
     async def send_ulaw(frames):
         # Telnyx bufferise et joue lui-meme ; 1 message media / seconde max.
@@ -239,13 +240,23 @@ async def stream(ws: WebSocket):
             log.info("stream fini: %d frames (%.1fs audio) en %.1fs%s", n_frames,
                      n_frames * 0.02, time.time() - t0,
                      " COUPE (barge-in)" if stop_flag["v"] else "")
+        return n_frames
 
     async def speak(text: str):
         if not text:
             return
         conv.info("BOT    : %s", text)
         if STREAM:
-            await speak_stream(text)
+            n_frames = await speak_stream(text)
+            if stop_flag["v"] and n_frames is not None:
+                # Coupé par le client : l'historique ne doit contenir que ce qu'il a
+                # ENTENDU. Sinon le modèle croit avoir dit des choses jamais prononcées
+                # et fabrique lui-même les malentendus suivants. ~14 caractères/s.
+                entendu = int(n_frames * 0.02 * 14)
+                if hist and hist[-1].get("role") == "assistant" and hist[-1].get("content") == text \
+                        and entendu < len(text):
+                    hist[-1]["content"] = text[:entendu].rstrip() + "… (coupé par le client)"
+                    log.info("historique tronqué à %d caractères (barge-in)", entendu)
             return
         pcm, sr = await synth_pcm(text)
         if stop_flag["v"]:
@@ -276,21 +287,54 @@ async def stream(ws: WebSocket):
         async with turn_lock:
             await _do_turn_locked(buf)
 
+    async def _incompris(n: int):
+        # Réparation mesurée (Bohus & Rudnicky 2005, 8 278 tours) : « pouvez-vous
+        # répéter ? » récupère 33,7 % des cas, AVANCER sur une autre question 64,4 %.
+        # Et après deux échecs, un troisième reprompt identique ne sert à rien :
+        # on clôt poliment (règle « 3 no-match → humain » de Google).
+        from hikky.domain.question_router import SLOT_ORDER, phrase_for_slot
+        from hikky.domain.routed_turn import build_recap
+        if n >= 3:
+            await speak("Je suis désolée, je vous entends très mal et je ne voudrais pas "
+                        "noter une réservation erronée. N'hésitez pas à rappeler, l'équipe "
+                        "du restaurant se fera un plaisir de vous répondre. Bonne journée !")
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        prefixe = "Je vous entends mal. " if n == 1 else "La ligne est mauvaise, je reprends. "
+        if awaiting:
+            await speak(prefixe + "Vous confirmez la réservation ? Dites oui, ou non.")
+            return
+        manquants = sess.intent.missing_slots()
+        slot = next((s for s in SLOT_ORDER if s in manquants), None)
+        if slot is None:
+            await speak(prefixe + build_recap(sess.intent))
+            return
+        phrase = phrase_for_slot(slot, phr)
+        phr.add(phrase)
+        await speak(prefixe + phrase)
+
     async def _do_turn_locked(buf: bytes):
-        nonlocal awaiting
+        nonlocal awaiting, n_incompris
         buf16 = _to16k(buf)
         # Silence en QUEUE seulement : vide le contexte droit (lookahead) de Nemotron.
         # En tete c'est inutile - l'attaque est couverte par le pre-roll d'audio reel.
         buf16 = buf16 + b"\x00" * (16000 * 2)   # 1.0s @ 16kHz
         text = await transcribe(buf16)
         if not text:
-            # STT vide : ne jamais rester muet -> redemander (adapte au contexte).
-            conv.info("CLIENT : (inaudible)")
-            if awaiting:
-                await speak("Pardon, je n'ai pas bien saisi. Vous confirmez la réservation ? Dites oui, ou non.")
-            else:
-                await speak("Pardon, je n'ai pas compris, pouvez-vous répéter ?")
+            # STT vide : ne jamais rester muet -> réparer (avancer, pas répéter).
+            n_incompris += 1
+            conv.info("CLIENT : (inaudible) [%d]", n_incompris)
+            await _incompris(n_incompris)
             return
+        n_incompris = 0
+        # Correction phonétique sur le lexique métier (« à l'al » -> « halal »).
+        from hikky.pipeline.stt_correction import corriger_transcription
+        text, changements = corriger_transcription(text, detail=True)
+        if changements:
+            log.info("STT corrigé : %s", changements)
         conv.info("CLIENT : %s", text)
         from hikky.domain.routed_turn import run_routed_turn
         out = await run_routed_turn(

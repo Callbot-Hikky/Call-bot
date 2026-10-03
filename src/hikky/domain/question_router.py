@@ -38,6 +38,10 @@ class Action(Enum):
     CONFIRM = "confirm"
     BOOK = "book"
     CORRECT = "correct"
+    # Réponse incertaine à la confirmation (« peut-être », « je sais pas ») : on ne
+    # devine ni oui ni non, on refait le récapitulatif. Quatre classes, pas deux —
+    # le modèle d'Amazon Lex (Yes / No / Maybe / Don't know).
+    RECONFIRM = "reconfirm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,9 @@ _QUESTION_FORTE = (
     # « Je voulais demander si le restaurant propose des plats végétariens ».
     "demander si", "je voulais demander", "je voudrais demander",
     "j'aimerais demander", "je peux demander", "puis-je demander",
+    # Question répétée, souvent agacée : « je vous ai demandé si… », « je répète ».
+    "demandé si", "demande si", "je vous ai demandé", "j'ai demandé",
+    "je répète", "je repete", "je redemande", "je vous redemande",
 )
 
 # Tournures qui n'interrogent que si le sujet est un fait du restaurant.
@@ -127,7 +134,7 @@ _INTERJECTIONS = re.compile(
 # confirmation trois fois. La liste couvre donc le parler courant, pas
 # seulement le français d'école.
 _ACCORD = (
-    "oui", "ouais", "ouaip", "yes", "yep", "si",
+    "oui", "ouais", "ouaip", "yes", "yep",
     "c'est ça", "c'est ca", "c'est bon", "c'est cela", "c'est exact",
     "exact", "exactement", "tout à fait", "tout a fait", "absolument",
     "affirmatif", "parfait", "impeccable", "nickel", "très bien",
@@ -138,7 +145,25 @@ _ACCORD = (
 _REFUS = (
     "non", "nan", "négatif", "negatif", "pas du tout", "pas vraiment",
     "plutôt pas", "plutot pas", "erreur", "faux", "incorrect",
-    "annule", "annulez", "annuler", "changer", "modifier",
+    "annule", "annulez", "annuler",
+)
+# « Si » n'est un accord qu'à lui seul (« Si ! », « mais si ») : c'est le « oui »
+# français à une question négative. Dans « je vous ai demandé si… » il n'affirme
+# rien — c'est ce contresens qui classait une question répétée en accord.
+_SI_SEUL = re.compile(r"^(mais |ah |ben )?si( si)*\s*[!.]*$")
+# Demande de changement pendant la confirmation : une correction, pas un refus.
+# « Changer » et « modifier » étaient dans les refus et déclenchaient une
+# correction même sans question fermée en attente.
+_CORRECTION = (
+    "changer", "modifier", "corriger", "plutôt", "plutot", "en fait",
+    "pas à", "pas a", "pas pour", "pas le", "pas la", "finalement",
+)
+# Réponse qui n'est ni oui ni non : on redit le récapitulatif au lieu de deviner.
+_INCERTAIN = re.compile(
+    r"\b(peut[- ]?[êe]tre|je (ne )?sais pas|pas s[uû]re?|j'h[ée]site|attendez|"
+    r"une seconde|un instant|deux secondes|je r[ée]fl[ée]chis|je demande|"
+    r"euh+|hum+|mmh+|hmm+|bof)\b",
+    re.IGNORECASE,
 )
 
 
@@ -165,7 +190,20 @@ def is_agreement(text: str) -> bool:
     if is_refusal(text):
         return False
     t = _normalise(text)
+    if _SI_SEUL.match(_sans_interjections(t)):
+        return True
     return any(_contient_expression(t, a) for a in _ACCORD)
+
+
+def is_correction(text: str) -> bool:
+    """Le client veut changer quelque chose (pendant la confirmation)."""
+    t = _normalise(text)
+    return any(_contient_expression(t, c) for c in _CORRECTION)
+
+
+def is_uncertain(text: str) -> bool:
+    """Ni oui ni non : « peut-être », « je sais pas », « attendez »."""
+    return bool(_INCERTAIN.search(_normalise(text)))
 
 
 def _normaliser_question(text: str) -> str:
@@ -187,13 +225,18 @@ def _sans_interjections(texte: str) -> str:
     return _INTERJECTIONS.sub("", texte).strip()
 
 
-def is_client_question(text: str) -> bool:
+def is_client_question(text: str, awaiting_confirmation: bool = False) -> bool:
     """Le client interroge-t-il, plutôt que de répondre ?
 
     Un point d'interrogation seul ne suffit pas : la transcription en
     ajoute ou en retire. On s'appuie sur des tournures, après avoir ôté les
     « oui », « non », « bonjour » de politesse qui précèdent souvent la
     vraie question au téléphone.
+
+    `awaiting_confirmation` est le CONTEXTE : un accord ou un refus n'existe
+    qu'en réponse à une question fermée du bot. Sans question en attente, on
+    ne cherche pas d'accord dans la phrase — c'est ce qui prenait « je vous ai
+    demandé si le restaurant est halal » pour un « si » d'approbation.
     """
     if not text:
         return False
@@ -203,8 +246,9 @@ def is_client_question(text: str) -> bool:
     if any(_contient_expression(coeur, m) for m in _QUESTION_FORTE):
         return True
     # Un accord ou un refus net n'est pas une question — mais on le juge sur
-    # le cœur de la phrase, pas sur le « oui » de politesse qui l'ouvre.
-    if is_agreement(coeur) or is_refusal(coeur):
+    # le cœur de la phrase, pas sur le « oui » de politesse qui l'ouvre, et
+    # seulement si le bot attend effectivement une réponse fermée.
+    if awaiting_confirmation and (is_agreement(coeur) or is_refusal(coeur)):
         return False
     if "?" in text and len(text.split()) > 2:
         return True
@@ -215,14 +259,19 @@ def route_turn(
     intent: Any, user_text: str, awaiting_confirmation: bool
 ) -> RouteDecision:
     """Décide ce qui doit se passer, à partir de l'état — pas d'un LLM."""
-    if is_client_question(user_text):
+    if is_client_question(user_text, awaiting_confirmation):
         return RouteDecision(Action.ANSWER_QUESTION)
 
     if awaiting_confirmation:
-        if is_refusal(user_text):
+        # Quatre classes, dans cet ordre : refus/correction, accord, incertain.
+        # Une mécompréhension coûte plus cher qu'une redemande : on ne réserve
+        # que sur un accord net, et on refait le récapitulatif dans le doute.
+        if is_refusal(user_text) or is_correction(user_text):
             return RouteDecision(Action.CORRECT)
         if is_agreement(user_text) and intent.is_complete():
             return RouteDecision(Action.BOOK)
+        if is_uncertain(user_text) or not user_text.strip():
+            return RouteDecision(Action.RECONFIRM)
 
     missing = intent.missing_slots()
     for slot in SLOT_ORDER:

@@ -309,6 +309,13 @@ async def run_routed_turn(
         await speak(reply)
         return TurnOutcome(should_end=False, slots=slots)
 
+    if decision.action is Action.RECONFIRM:
+        # Ni oui ni non : on ne devine pas, on redit le récapitulatif calmement.
+        reply = "Pas de souci, je reprends. " + build_recap(session.intent)
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=False, awaiting_confirmation=True, slots=slots)
+
     if decision.action is Action.CONFIRM:
         reply = build_recap(session.intent)
         await _remember(history, user_text, reply)

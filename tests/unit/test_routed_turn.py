@@ -300,3 +300,12 @@ async def test_le_phraseur_est_sollicite_quand_il_y_a_quelque_chose_a_accuser():
         speak=lambda t: _noop(), phraseur=p,
     )
     assert p.appels == ["time"]
+
+
+async def test_une_reponse_incertaine_refait_le_recap_sans_reserver():
+    s = FakeSession(_complet())
+    dits = []
+    out = await _run(s, "euh, je sais pas", dits, attente=True)
+    assert s.booked == 0
+    assert out.awaiting_confirmation is True
+    assert "bien cela" in dits[-1].lower() and dits[-1].startswith("Pas de souci")
