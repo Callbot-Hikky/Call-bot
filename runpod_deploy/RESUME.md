@@ -149,6 +149,28 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
     `--body` depuis le shell `!` enregistre une valeur VIDE ; (c) le workflow FRONT réécrit
     `/opt/hikky/.env` sans `VOYAGE_API_KEY` ni webhooks Discord (bug latent signalé à l'équipe) ;
     (d) la clé Voyage a transité en clair → à faire tourner.
+16. **Pod hikky-bot-6 (2026-10-03) — journée de correctifs mesurés sur appels réels** :
+    STT → **faster-whisper large-v3** (A/B sur 10 WAV réels : Nemotron rendait 3 énoncés
+    VIDES, « Stamps » pour « restaurant ») ; `stt_server_nemotron.py` conservé en secours.
+    Instrumentation : chaque énoncé en WAV dans `/workspace/debug/`, journal VAD/barge-in/flux.
+    Un seul `<Stream>` par CallSid (Telnyx avait envoyé 2 POST pour 1 appel → 2 bots).
+    TTS : emballement = **boucle sur un code** (analyse `debug/babil.json`) ; instruction
+    FRANÇAISE = cause principale (6/60 → 1/60 en anglais sobre) ; arrêt sur boucle (12 codes
+    identiques) + plafond proportionnel (2,5 frames/caractère) → pire cas 12,8 s → 4,5 s.
+    `labs/` : `stt_ab.py`, `bench_runaway.py`, `analyse_babil.py`, résultats JSON.
+    **Phase 0 dialogue (non committée au moment d'écrire)** : routeur avec CONTEXTE
+    (accord/refus seulement si `awaiting_confirmation` ; « si » seul = accord ; « demandé si »,
+    « je répète » = question ; 4 classes de confirmation → `Action.RECONFIRM`) ; réparation
+    « avancer au lieu de répéter » + 3 énoncés vides → clôture polie (`_incompris`) ;
+    correction phonétique post-STT `hikky/pipeline/stt_correction.py` (« à l'al » → halal) ;
+    historique tronqué à ce que le client a entendu en cas de barge-in.
+    **Recherche (4 sub-agents, rapports dans la session)** : les regex ne tiendront jamais →
+    cible = classification par le LLM déjà appelé (énum contrainte) puis classifieur
+    CamemBERT/SetFit sur CPU entraîné sur NOS appels ; TTS autorégressif = emballement
+    structurel → Qwen3-TTS-Base + voix française de référence, Piper fr (non-AR) en secours,
+    Kyutai/CosyVoice3 à terme ; STT → correction phonétique, modèle distil-fr, NeMo + word
+    boosting, fine-tuning sur 25-50 h d'appels réels ; LLM 32B borné par la bande mémoire
+    de l'A40 → 12-14B ; **harnais d'évaluation** (chaque appel raté = un test) avant toute refonte.
 
 ## PIÈGES CRITIQUES (m'ont coûté des heures)
 - **NE JAMAIS `pkill -f "tts_server"`** : la commande de lancement contient
