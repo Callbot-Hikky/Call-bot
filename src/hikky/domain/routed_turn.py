@@ -23,7 +23,15 @@ from typing import Any
 
 from hikky.domain.outcomes import CallOutcome
 from hikky.domain.phraseur import Intention
-from hikky.domain.question_router import Action, phrase_for_slot, route_turn
+from hikky.domain.question_router import (
+    SLOT_ORDER,
+    Action,
+    is_client_question,
+    is_indifferent,
+    is_refusal,
+    phrase_for_slot,
+    route_turn,
+)
 
 logger = logging.getLogger("hikky.routed_turn")
 conversation = logging.getLogger("hikky.conversation")
@@ -220,9 +228,37 @@ async def run_routed_turn(
         nom = _nom_depuis_reponse_courte(user_text)
         if nom:
             slots = {**slots, "customer_name": nom}
+    # Ce que le bot vient de demander : la réponse se lit à la lumière de la question.
+    demande = next((s for s in SLOT_ORDER if s in session.intent.missing_slots()), None)
+    if demande == "party_size" and "party_size" not in slots:
+        # « 14, 14. », « on sera au 14 » : l'extracteur LLM n'a rien rendu, deux fois de
+        # suite en appel réel. Un nombre nu en réponse à « combien ? » EST le nombre.
+        n = _nombre_depuis_reponse(user_text)
+        if n is not None:
+            slots = {**slots, "party_size": n}
+    # Le client a refusé notre proposition d'heure sans en donner une autre : on l'efface.
+    if _proposition_en_cours(history) and "time" not in slots and is_refusal(user_text):
+        session.clear_slots(["time"])
+    # « N'importe quelle heure », ou l'heure déjà demandée deux fois sans réponse
+    # exploitable : redemander boucle (5 fois de suite en appel réel). On PROPOSE.
+    proposition = None
+    if (
+        demande == "time"
+        and "time" not in slots
+        and not is_client_question(user_text)
+        and (is_indifferent(user_text) or _heure_deja_demandee(history) >= 2)
+    ):
+        proposition = _proposer_heure(session)
+        if proposition is not None:
+            slots = {**slots, "time": proposition}
     if slots:
         conversation.info("  extrait : %s", slots)
         session.apply_slots(slots)
+    if proposition is not None:
+        reply = _phrase_proposition(session, proposition)
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=False, slots=slots)
 
     # Plafond de groupe : au-delà, l'assistant ne prend pas la réservation par
     # téléphone. On refuse tôt et clairement, plutôt que de proposer d'autres
@@ -277,6 +313,13 @@ async def run_routed_turn(
             awaiting_confirmation=awaiting_confirmation,
             slots=slots,
         )
+
+    if decision.action is Action.FAREWELL:
+        # « Je vous souhaite une bonne journée » recevait « Vous serez combien ? ».
+        reply = "Très bien, merci de votre appel et bonne journée !"
+        await _remember(history, user_text, reply)
+        await speak(reply)
+        return TurnOutcome(should_end=True, slots=slots)
 
     if decision.action is Action.BOOK:
         outcome = await session.book(customer_phone)
@@ -387,6 +430,111 @@ def _nom_depuis_reponse_courte(user_text: str) -> str | None:
     if not all(re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’-]*", m) for m in mots):
         return None
     return " ".join(m[:1].upper() + m[1:] for m in mots)
+
+
+_NOMBRES = {
+    "un": 1, "une": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "six": 6,
+    "sept": 7, "huit": 8, "neuf": 9, "dix": 10, "onze": 11, "douze": 12,
+    "treize": 13, "quatorze": 14, "quinze": 15, "seize": 16, "dix-sept": 17,
+    "dix-huit": 18, "dix-neuf": 19, "vingt": 20, "trente": 30, "quarante": 40,
+}
+
+
+def _nombre_depuis_reponse(user_text: str) -> int | None:
+    """Le nombre de convives donné en réponse à « combien ? », ou None.
+
+    Chiffres (« 14, 14. ») ou mots (« quatre », « on est six »). Une heure
+    (« 20h », « vingt heures ») n'est pas un nombre de personnes.
+    """
+    t = (user_text or "").lower().replace("’", "'")
+    if re.search(r"\d\s*h\b|\bheures?\b|\bh\d", t) or is_client_question(t):
+        return None
+    m = re.search(r"\b(\d{1,2})\b", t)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 50 else None
+    mots = re.findall(r"[a-zàâéèêîôûç-]+", t)
+    for i, mot in enumerate(mots):
+        if mot in ("un", "une"):
+            # Article le plus souvent (« une terrasse ») : nombre seulement si
+            # c'est toute la réponse ou s'il compte des personnes.
+            suivant = mots[i + 1] if i + 1 < len(mots) else ""
+            if len(mots) <= 2 or suivant.startswith(("personne", "couvert", "seul")):
+                return 1
+            continue
+        if mot in _NOMBRES:
+            return _NOMBRES[mot]
+    return None
+
+
+def _heure_deja_demandee(history: list[dict[str, str]] | None) -> int:
+    """Combien de fois le bot a déjà demandé l'heure dans cet appel."""
+    return sum(
+        1 for m in (history or [])
+        if m.get("role") == "assistant"
+        and "heure" in m.get("content", "").lower()
+        and m.get("content", "").rstrip().endswith("?")
+        and "propose" not in m.get("content", "").lower()
+    )
+
+
+def _proposition_en_cours(history: list[dict[str, str]] | None) -> bool:
+    return bool(history) and history[-1].get("role") == "assistant" \
+        and "je vous propose" in history[-1].get("content", "").lower()
+
+
+def _arrondir_demi_heure(t: Any) -> Any:
+    from datetime import time as dtime
+    minute = 0 if t.minute == 0 else (30 if t.minute <= 30 else 60)
+    if minute == 60:
+        return dtime((t.hour + 1) % 24, 0)
+    return dtime(t.hour, minute)
+
+
+def _proposer_heure(session: Any, now: Any = None) -> Any:
+    """Une heure plausible à proposer pour le jour demandé, ou None.
+
+    Le soir si le restaurant ouvre le soir, une heure après l'ouverture ; si c'est
+    aujourd'hui, pas avant une demi-heure à partir de maintenant, et jamais dans la
+    dernière heure du service.
+    """
+    from datetime import datetime, time as dtime, timedelta
+    context = getattr(session, "context", None)
+    intent = getattr(session, "intent", None)
+    jour = getattr(intent, "date", None)
+    plages = sorted(
+        (oh for oh in (getattr(context, "opening_hours", None) or []) if jour is not None and oh.weekday == jour.weekday()),
+        key=lambda oh: oh.opens,
+    )
+    if not plages:
+        return None
+    now = now or datetime.now()
+    aujourd_hui = jour == now.date()
+    pas_avant = _arrondir_demi_heure((now + timedelta(minutes=30)).time()) if aujourd_hui else None
+    # Le soir d'abord : c'est le service qu'un appelant du jour vise le plus souvent.
+    ordre = [p for p in plages if p.opens >= dtime(17, 0)] + [p for p in plages if p.opens < dtime(17, 0)]
+    for p in ordre:
+        debut = dtime(min(p.opens.hour + 1, 23), p.opens.minute)
+        if pas_avant is not None and pas_avant > debut:
+            debut = pas_avant
+        fin = dtime(max(p.closes.hour - 1, 0), p.closes.minute)
+        if debut <= fin:
+            return debut
+    return None
+
+
+def _phrase_proposition(session: Any, heure: Any) -> str:
+    context = getattr(session, "context", None)
+    jour = getattr(getattr(session, "intent", None), "date", None)
+    plages = sorted(
+        (oh for oh in (getattr(context, "opening_hours", None) or []) if jour is not None and oh.weekday == jour.weekday()),
+        key=lambda oh: oh.opens,
+    )
+    horaires = " et ".join(f"de {_heure_fr(p.opens)} à {_heure_fr(p.closes)}" for p in plages)
+    return (
+        f"{_jour_fr(jour).capitalize()}, nous vous accueillons {horaires}. "
+        f"Je vous propose {_heure_fr(heure)}, ça vous convient ?"
+    )
 
 
 def _reservation_engagee(intent: Any) -> bool:

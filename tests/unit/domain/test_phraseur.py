@@ -21,6 +21,8 @@ vaut une phrase un peu raide que trois secondes de silence.
 
 import asyncio
 
+import pytest
+
 from hikky.domain.phraseur import Intention, Phraseur
 
 
@@ -146,3 +148,14 @@ async def test_le_modele_ne_peut_pas_parler_de_plats_en_demandant_un_slot():
     )
     dit = await Phraseur(modele).formuler(intention)
     assert dit == intention.repli
+
+
+@pytest.mark.parametrize("phrase", [
+    "Vous avez réservé pour 23h55, combien serez-vous ?",       # fausse confirmation (appel réel)
+    "Vous venez pour aujourd'hui, c'est ça ? Et à quelle heure ?",  # pseudo-confirmation
+    "Bien sûr, Monsieur, pour quel créneau souhaitez-vous réserver ?",  # civilité inventée
+    "Très bien, à quelle heure ? 20h ou 21h ?",                # chiffres : le TTS les lit mal
+])
+async def test_les_derapages_observes_en_appel_reel_retombent_sur_le_repli(phrase):
+    intention = _intention(slot="time")
+    assert await Phraseur(_ModeleFidele(phrase)).formuler(intention) == intention.repli

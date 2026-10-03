@@ -309,3 +309,48 @@ async def test_une_reponse_incertaine_refait_le_recap_sans_reserver():
     assert s.booked == 0
     assert out.awaiting_confirmation is True
     assert "bien cela" in dits[-1].lower() and dits[-1].startswith("Pas de souci")
+
+
+# ── 21:50 : « n'importe quelle heure » redemandé 5 fois ; « 14, 14 » jamais extrait ──
+
+
+def _session_sans_heure():
+    return FakeSession(ReservationIntent().with_date(date(2026, 10, 3)))
+
+
+async def test_indifferent_sur_l_heure_le_bot_propose_un_creneau_et_le_retient():
+    s = _session_sans_heure()
+    dits = []
+    await _run(s, "Oui, n'importe quelle heure disponible.", dits)
+    assert s.intent.time is not None, "le bot doit proposer et retenir une heure"
+    assert "propose" in dits[-1].lower() and dits[-1].endswith("?"), dits[-1]
+
+
+async def test_un_nombre_nu_en_reponse_a_la_question_des_couverts_est_retenu():
+    for texte, attendu in (("14, 14.", 14), ("On sera au 14.", 14), ("quatre", 4), ("on est six", 6), ("2 personnes", 2)):
+        s = FakeSession(ReservationIntent().with_date(date(2026, 10, 3)).with_time(time(20)))
+        await _run(s, texte, [])  # l'extracteur factice ne renvoie rien : c'est le code qui retient
+        assert s.intent.party_size == attendu, texte
+
+
+async def test_un_nombre_n_est_pas_pris_pour_des_couverts_quand_on_demande_autre_chose():
+    s = FakeSession(ReservationIntent())  # on demande le JOUR
+    await _run(s, "14", [])
+    assert s.intent.party_size is None
+
+
+async def test_l_au_revoir_clot_poliment_sans_reserver():
+    s = _session_sans_heure()
+    dits = []
+    out = await _run(s, "Je vous souhaite une bonne journée.", dits)
+    assert out.should_end is True and s.booked == 0
+    assert "bonne" in dits[-1].lower() and not dits[-1].endswith("?")
+
+
+async def test_un_article_dans_une_question_n_est_pas_un_nombre_de_couverts():
+    s = FakeSession(ReservationIntent().with_date(date(2026, 10, 3)).with_time(time(20)))
+    await _run(s, "Vous avez une terrasse ?", [], answerer=FakeAnswerer("Oui."))
+    assert s.intent.party_size is None
+    s2 = FakeSession(ReservationIntent().with_date(date(2026, 10, 3)).with_time(time(20)))
+    await _run(s2, "une personne", [])
+    assert s2.intent.party_size == 1

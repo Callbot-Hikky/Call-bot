@@ -42,6 +42,9 @@ class Action(Enum):
     # devine ni oui ni non, on refait le récapitulatif. Quatre classes, pas deux —
     # le modèle d'Amazon Lex (Yes / No / Maybe / Don't know).
     RECONFIRM = "reconfirm"
+    # Le client prend congé (« bonne journée », « je vous laisse ») : on clôt
+    # poliment au lieu de reposer la question des couverts (observé en appel réel).
+    FAREWELL = "farewell"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +161,23 @@ _CORRECTION = (
     "changer", "modifier", "corriger", "plutôt", "plutot", "en fait",
     "pas à", "pas a", "pas pour", "pas le", "pas la", "finalement",
 )
+# Le client prend congé. « Merci » seul n'en fait pas partie : il ponctue
+# souvent une réponse (« merci, pour deux personnes »).
+_AU_REVOIR = re.compile(
+    r"\b(au revoir|bonne (journ[ée]e|soir[ée]e|fin de journ[ée]e)|[àa] bient[ôo]t|"
+    r"je vous laisse|laissez? tomber|tant pis|je (vais )?rappel\w*|"
+    r"merci quand m[êe]me|c'est pas grave,? merci|bonne continuation)\b",
+    re.IGNORECASE,
+)
+# Le client s'en remet à nous (« n'importe quelle heure ») : redemander la
+# même chose boucle à l'infini — observé 5 fois de suite en appel réel. Il
+# faut PROPOSER.
+_INDIFFERENT = re.compile(
+    r"\b(n'importe|peu importe|comme vous voulez|ce que vous (avez|voulez|proposez)|"
+    r"ce qui est (disponible|libre|possible)|ce qu'il y a|quand vous (voulez|pouvez)|"
+    r"[àa] vous de voir|vous choisissez|je vous laisse choisir|celle que vous voulez)\b",
+    re.IGNORECASE,
+)
 # Réponse qui n'est ni oui ni non : on redit le récapitulatif au lieu de deviner.
 _INCERTAIN = re.compile(
     r"\b(peut[- ]?[êe]tre|je (ne )?sais pas|pas s[uû]re?|j'h[ée]site|attendez|"
@@ -204,6 +224,20 @@ def is_correction(text: str) -> bool:
 def is_uncertain(text: str) -> bool:
     """Ni oui ni non : « peut-être », « je sais pas », « attendez »."""
     return bool(_INCERTAIN.search(_normalise(text)))
+
+
+def is_farewell(text: str) -> bool:
+    """Le client prend congé : on clôt au lieu de redemander."""
+    return bool(_AU_REVOIR.search(_normalise(text).replace("’", "'")))
+
+
+def is_indifferent(text: str) -> bool:
+    """Le client s'en remet à nous : il faut lui PROPOSER, pas redemander."""
+    t = _normalise(text).replace("’", "'")
+    # Une heure explicite dans la phrase l'emporte : « vingt heures, c'est possible ? »
+    if re.search(r"\d|\b(midi|minuit|heures?)\b", t) and not _INDIFFERENT.search(t):
+        return False
+    return bool(_INDIFFERENT.search(t))
 
 
 def _normaliser_question(text: str) -> str:
@@ -272,6 +306,9 @@ def route_turn(
             return RouteDecision(Action.BOOK)
         if is_uncertain(user_text) or not user_text.strip():
             return RouteDecision(Action.RECONFIRM)
+
+    if is_farewell(user_text):
+        return RouteDecision(Action.FAREWELL)
 
     missing = intent.missing_slots()
     for slot in SLOT_ORDER:

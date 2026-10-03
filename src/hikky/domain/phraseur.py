@@ -67,9 +67,16 @@ Ta phrase :"""
 _AFFIRMATION = re.compile(
     r"\b(je confirme|c'est bien|est confirm\w*|confirm[ée]e?s?\b|"
     r"c'est not[ée]|bien not[ée]|est not[ée]|j'ai not[ée]|"
-    r"est r[ée]serv[ée]|c'est r[ée]serv[ée]|enregistr[ée]e?s?)\b",
+    r"est r[ée]serv[ée]|c'est r[ée]serv[ée]|enregistr[ée]e?s?|"
+    # Appel réel : « Vous avez réservé pour 23h55, combien serez-vous ? » — rien
+    # n'était réservé. Et « c'est ça ? » ouvre un faux tour oui/non.
+    r"(vous avez|nous avons|on a|j'ai) (r[ée]serv|not|enregistr|confirm|valid)\w*|"
+    r"c'est [çc]a|c'est cela|n'est-ce pas)\b",
     re.IGNORECASE,
 )
+# Le modèle n'a aucune idée du sexe de l'appelant : « Bien sûr, Monsieur » est
+# une présomption (observée). Et les chiffres se lisent mal au TTS (« 20h »).
+_PRESOMPTION = re.compile(r"\b(monsieur|madame|mademoiselle)\b|\d", re.IGNORECASE)
 
 
 # Le modèle n'a qu'un slot à demander ; tout objet hors réservation est inventé.
@@ -151,5 +158,8 @@ class Phraseur:
             return repli
         if _HORS_SUJET.search(phrase):
             logger.info("formulation hors réservation (plats, commande…) — repli: %r", phrase)
+            return repli
+        if _PRESOMPTION.search(phrase):
+            logger.info("formulation avec civilité présumée ou chiffres — repli: %r", phrase)
             return repli
         return phrase

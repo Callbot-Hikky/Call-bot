@@ -301,3 +301,34 @@ def test_changer_hors_confirmation_n_est_pas_un_refus():
 ])
 def test_les_questions_repetees_restent_des_questions(texte):
     assert is_client_question(texte), texte
+
+
+# ── Appels du 2026-10-03 21:50 : au revoir non compris, « n'importe quelle heure » bouclé ──
+
+
+@pytest.mark.parametrize("texte", [
+    "Je vous souhaite une bonne journée.", "Merci, au revoir.", "Bon, je vous laisse, bonne soirée",
+    "Laissez tomber, je rappellerai.", "Tant pis, merci quand même.",
+])
+def test_un_au_revoir_clot_l_appel(texte):
+    d = route_turn(ReservationIntent().with_date(date(2026, 10, 3)), texte, False)
+    assert d.action is Action.FAREWELL, texte
+
+
+def test_merci_seul_n_est_pas_un_au_revoir():
+    d = route_turn(ReservationIntent(), "Merci.", False)
+    assert d.action is Action.ASK_SLOT
+
+
+@pytest.mark.parametrize("texte", [
+    "Oui, n'importe quelle heure disponible.", "Peu importe, ce que vous avez.",
+    "Comme vous voulez.", "Ce qui est disponible, moi ça me va.",
+])
+def test_une_reponse_indifferente_est_reconnue(texte):
+    from hikky.domain.question_router import is_indifferent
+    assert is_indifferent(texte), texte
+
+
+def test_une_heure_precise_n_est_pas_indifferente():
+    from hikky.domain.question_router import is_indifferent
+    assert not is_indifferent("vingt heures, c'est possible ?")

@@ -5,6 +5,11 @@ Reutilise le domaine Call-bot (run_routed_turn, reservation backend), LLM Qwen 3
 Reconstruit 2026-09-16 sur nouveau pod. Voix ona, codec A-law entrant, salutation cachee,
 reponses courtes, re-prompt de confirmation."""
 import os, sys, json, base64, asyncio, audioop, time, logging
+# Le pod RunPod est en UTC : à 00h29 à Paris, « aujourd'hui » valait encore la veille
+# pour l'extracteur de dates (appel réel du 2026-10-04 : « aujourd'hui (dimanche) »
+# compris samedi). Le restaurant est en France : toute l'horloge du process l'est aussi.
+os.environ.setdefault("TZ", os.environ.get("HIKKY_TIMEZONE", "Europe/Paris"))
+time.tzset()
 try:  # reechantillonnage 8k->16k de qualite (polyphase). audioop.ratecv = interpolation
     import numpy as _np  # grossiere (et audioop disparait en Python 3.13).
     import soxr as _soxr
@@ -81,6 +86,8 @@ async def _build():
     log.info("base de connaissances branchée (%s)", RESTO_PHONE)
     STATE["phraseur"] = Phraseur(llm)
     STATE["extractor"] = LLMSlotExtractor(llm)
+    from datetime import datetime as _dt
+    log.info("heure locale du bot : %s (%s)", _dt.now().strftime("%A %d %B %Y %H:%M"), os.environ.get("TZ"))
     STATE["http"] = httpx.AsyncClient(timeout=60.0)
     # Cache de la salutation (texte fixe) : synthetisee 1x -> frames mu-law pretes.
     try:
@@ -182,6 +189,9 @@ async def stream(ws: WebSocket):
     call_tag = time.strftime("%H%M%S")
     utter_n = 0
     n_incompris = 0         # énoncés vides consécutifs (remis à zéro dès qu'on comprend)
+    en_attente: list = []   # (horodatage, énoncé) dit par le client pendant que le bot parlait
+    dernier_texte = ""      # dernière phrase du client traitée (pour ignorer une répétition)
+    ATTENTE_MAX_S = 6.0     # au-delà, l'énoncé gardé est périmé : le client a déjà avancé
 
     async def send_ulaw(frames):
         # Telnyx bufferise et joue lui-meme ; 1 message media / seconde max.
@@ -252,6 +262,11 @@ async def stream(ws: WebSocket):
     async def speak(text: str):
         if not text:
             return
+        # Nouvelle phrase = nouveau droit à la parole. Le drapeau de barge-in n'était
+        # remis à zéro qu'au moment d'ENVOYER de l'audio, or speak_stream le testait
+        # avant d'envoyer : après la première interruption, le bot restait MUET
+        # jusqu'à la fin de l'appel (appel réel du 2026-10-03 21:49 : « Allô ? Allô ? »).
+        stop_flag["v"] = False
         conv.info("BOT    : %s", text)
         if STREAM:
             n_frames = await speak_stream(text)
@@ -284,15 +299,28 @@ async def stream(ws: WebSocket):
         except Exception as e:  # noqa: BLE001 - le debug ne doit jamais casser l'appel
             return f"(dump échoué: {e})"
 
-    async def do_turn(buf: bytes):
+    async def do_turn(buf: bytes, rejoue: bool = False):
         nonlocal awaiting, utter_n
         utter_n += 1
         n = utter_n
         path = _dump(buf, n)
-        log.info("énoncé #%d : %.2fs, rms=%d, max=%d -> %s", n, len(buf) / 16000,
-                 audioop.rms(buf, 2), audioop.max(buf, 2), path)
+        log.info("énoncé #%d%s : %.2fs, rms=%d, max=%d -> %s", n, " (rejoué)" if rejoue else "",
+                 len(buf) / 16000, audioop.rms(buf, 2), audioop.max(buf, 2), path)
         async with turn_lock:
-            await _do_turn_locked(buf)
+            await _do_turn_locked(buf, rejoue)
+        # Ce que le client a dit pendant que le bot parlait est traité maintenant.
+        if en_attente and not speaking:
+            quand, suivant = en_attente.pop()
+            en_attente.clear()
+            age = time.time() - quand
+            if age > ATTENTE_MAX_S:
+                # Appel réel (Paul) : la répétition d'une question, gardée puis rejouée
+                # après la réponse, faisait répondre DEUX fois à la même question — le
+                # bot avait un tour de retard. Un énoncé gardé trop vieux est périmé.
+                log.info("énoncé gardé périmé (%.1fs) -> ignoré", age)
+            else:
+                log.info("traitement de l'énoncé gardé (%.1fs, âge %.1fs)", len(suivant) / 16000, age)
+                asyncio.create_task(do_turn(suivant, rejoue=True))
 
     async def _incompris(n: int):
         # Réparation mesurée (Bohus & Rudnicky 2005, 8 278 tours) : « pouvez-vous
@@ -323,8 +351,8 @@ async def stream(ws: WebSocket):
         phr.add(phrase)
         await speak(prefixe + phrase)
 
-    async def _do_turn_locked(buf: bytes):
-        nonlocal awaiting, n_incompris
+    async def _do_turn_locked(buf: bytes, rejoue: bool = False):
+        nonlocal awaiting, n_incompris, dernier_texte
         buf16 = _to16k(buf)
         # Silence en QUEUE seulement : vide le contexte droit (lookahead) de Nemotron.
         # En tete c'est inutile - l'attaque est couverte par le pre-roll d'audio reel.
@@ -342,6 +370,14 @@ async def stream(ws: WebSocket):
         text, changements = corriger_transcription(text, detail=True)
         if changements:
             log.info("STT corrigé : %s", changements)
+        cle = "".join(c for c in text.lower() if c.isalnum())
+        if rejoue and cle and cle == dernier_texte:
+            # Le client a répété sa question pendant que le bot y répondait : on ne
+            # répond pas une seconde fois (appel réel : « la même réponse que
+            # précédemment alors que j'avais posé une nouvelle question »).
+            log.info("énoncé rejoué identique au précédent -> ignoré : %r", text)
+            return
+        dernier_texte = cle
         conv.info("CLIENT : %s", text)
         from hikky.domain.routed_turn import run_routed_turn
         out = await run_routed_turn(
@@ -351,6 +387,13 @@ async def stream(ws: WebSocket):
             recent_phrasings=phr, phraseur=STATE["phraseur"],
         )
         awaiting = out.awaiting_confirmation
+        if out.should_end:
+            # Au revoir ou réservation faite : on raccroche proprement après la phrase.
+            log.info("fin d'appel demandée par le dialogue")
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     while True:
         try:
@@ -402,11 +445,14 @@ async def stream(ws: WebSocket):
                     silence = 0
                     if n >= MIN_SPEECH and not speaking:
                         asyncio.create_task(do_turn(buf))
-                    elif n >= MIN_SPEECH:
+                    elif n >= 2 * MIN_SPEECH:
                         # Le client a parlé pendant que le bot parlait, sans franchir le seuil
-                        # de barge-in : énoncé perdu. Tracé pour mesurer la fréquence du cas.
-                        log.info("énoncé ignoré (bot en train de parler) : %d frames, %.1fs",
+                        # de barge-in. Jeté, c'était perdu (3 fois par appel, jusqu'à 4,4 s
+                        # de parole). On le garde et on le traite dès que le bot a fini.
+                        log.info("énoncé pendant la parole du bot : %d frames, %.1fs -> gardé",
                                  n, len(buf) / 16000)
+                        en_attente.append((time.time(), buf))
+                        en_attente[:-1] = []   # seul le plus récent compte
             preroll += pcm
             if len(preroll) > PREROLL_BYTES:
                 del preroll[:len(preroll) - PREROLL_BYTES]

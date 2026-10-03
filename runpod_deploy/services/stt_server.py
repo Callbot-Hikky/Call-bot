@@ -40,12 +40,24 @@ def _run(audio: np.ndarray) -> str:
     )
     parts = []
     for s in segs:
-        # Whisper hallucine sur le bruit (« Sous-titres réalisés par… ») : un segment jugé
-        # « sans parole » ou très improbable est ignoré plutôt que prononcé au client.
-        if s.no_speech_prob > 0.6 and s.avg_logprob < -1.0:
+        # Whisper hallucine sur le bruit : « Sous-titrage ST' 501 », « Il est gâteau »,
+        # « Il faut forcément les usineurs » (appel réel du 2026-10-03) ont été pris pour
+        # des réponses. Un segment jugé sans parole, très improbable, ou qui ressemble à
+        # un générique de sous-titres est ignoré plutôt que prononcé au client.
+        texte = s.text.strip()
+        if s.no_speech_prob > 0.6 or s.avg_logprob < -1.2 or _HALLUCINATION.search(texte):
+            print(f"[stt] segment ecarte (no_speech={s.no_speech_prob:.2f} logprob={s.avg_logprob:.2f}): {texte!r}", flush=True)
             continue
-        parts.append(s.text.strip())
+        parts.append(texte)
     return " ".join(p for p in parts if p).strip()
+
+
+import re as _re
+_HALLUCINATION = _re.compile(
+    r"sous[- ]titr|amara\.org|merci d'avoir regard|abonnez|cha[îi]ne youtube|"
+    r"\bST'? ?\d{3}\b|www\.|\.com\b|♪|\[musique\]|\(musique\)",
+    _re.IGNORECASE,
+)
 
 
 @app.on_event("startup")
