@@ -1,0 +1,82 @@
+[
+ {
+  "wav": "163145_01.wav",
+  "dur_s": 3.26,
+  "nemotron": "Oui, bonjour, j'aimerais savoir si le restaurant est à l'al",
+  "t_nem": 0.35,
+  "whisper": "Oui, bonjour. J'aimerais savoir si le restaurant est à l'âge...",
+  "t_wh": 0.74
+ },
+ {
+  "wav": "163145_02.wav",
+  "dur_s": 2.58,
+  "nemotron": "J'aimerais savoir si le",
+  "t_nem": 0.27,
+  "whisper": "J'aimerais savoir si le...",
+  "t_wh": 0.44
+ },
+ {
+  "wav": "163145_03.wav",
+  "dur_s": 2.38,
+  "nemotron": "Le statement propose des options végétariennes.",
+  "t_nem": 0.44,
+  "whisper": "Le restaurant propose des options végétariennes.",
+  "t_wh": 0.27
+ },
+ {
+  "wav": "163145_04.wav",
+  "dur_s": 3.3,
+  "nemotron": "J'ai sûr que Stamps propose une option végétarienne ou",
+  "t_nem": 0.37,
+  "whisper": "Est-ce que le restaurant propose une option végétarienne ou...",
+  "t_wh": 0.33
+ },
+ {
+  "wav": "163145_05.wav",
+  "dur_s": 1.3,
+  "nemotron": "",
+  "t_nem": 0.26,
+  "whisper": "Au vegan.",
+  "t_wh": 0.18
+ },
+ {
+  "wav": "163152_01.wav",
+  "dur_s": 3.68,
+  "nemotron": "Je réservé pour deux pour demain.",
+  "t_nem": 0.28,
+  "whisper": "Je veux réserver pour deux pour demain.",
+  "t_wh": 0.23
+ },
+ {
+  "wav": "163152_02.wav",
+  "dur_s": 1.4,
+  "nemotron": "Quinze heures",
+  "t_nem": 0.23,
+  "whisper": "15 heures.",
+  "t_wh": 0.2
+ },
+ {
+  "wav": "163152_03.wav",
+  "dur_s": 3.1,
+  "nemotron": "Est-ce que vous avez un fumeur?",
+  "t_nem": 0.34,
+  "whisper": "Est-ce que vous avez un fumoir?",
+  "t_wh": 0.28
+ },
+ {
+  "wav": "163152_04.wav",
+  "dur_s": 1.94,
+  "nemotron": "",
+  "t_nem": 0.18,
+  "whisper": "Et en parking?",
+  "t_wh": 0.22
+ },
+ {
+  "wav": "163152_05.wav",
+  "dur_s": 2.82,
+  "nemotron": "",
+  "t_nem": 0.31,
+  "whisper": "Ou est-ce qu'on mange halal chez vous ?",
+  "t_wh": 0.29
+ }
+]

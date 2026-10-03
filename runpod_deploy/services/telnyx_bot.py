@@ -38,7 +38,9 @@ RESTO_PHONE = os.environ.get("HIKKY_RESTAURANT_PHONE", "+33472100100")
 GGUF = "/workspace/models/Qwen2.5-32B-Instruct-Q5_K_M.gguf"
 
 THRESH = 800
-SIL_FRAMES = 25          # 500 ms de silence (hangover) avant de cloturer un tour
+SIL_FRAMES = 35          # 700 ms de silence (hangover) avant de cloturer un tour.
+                         # 500 ms coupait 2 énoncés sur 10 en pleine phrase (appel du 2026-10-03 :
+                         # « si le restaurant est à l'al… », « j'aimerais savoir si le… »).
 MIN_SPEECH = 12          # min ~240 ms de parole : filtre les blips, garde 'oui'/'non'
 BARGE_THRESH = 2500      # parole soutenue nettement au-dessus du bruit de ligne
 BARGE_MIN_FRAMES = 12    # ~240 ms continus avant de couper le bot
@@ -91,8 +93,29 @@ async def _build():
     log.info("orchestrateur pret")
 
 
+_STREAMED: dict = {}   # CallSid -> horodatage du <Stream> déjà rendu (dédoublonnage)
+
+
 @app.post("/telnyx/inbound")
-async def inbound(_: Request):
+async def inbound(request: Request):
+    # Observé en appel réel (2026-10-03) : DEUX POST pour UN appel, à 7 s d'écart (status
+    # callback ou nouvelle tentative Telnyx). Chacun recevait un <Connect><Stream> -> deux
+    # sessions sur le même appel : deux bots parlant l'un sur l'autre, LLM et TTS partagés
+    # (phraseur « trop lent », TTFA 2,3 s), énoncés ignorés. Un seul Stream par CallSid.
+    from urllib.parse import parse_qs
+    form = {k: v[0] for k, v in parse_qs((await request.body()).decode(errors="replace")).items()}
+    sid = form.get("CallSid") or form.get("CallSidLegacy") or ""
+    log.info("inbound: CallSid=%s status=%s from=%s champs=%s", sid, form.get("CallStatus"),
+             form.get("From"), sorted(form))
+    now = time.time()
+    for k in [k for k, ts in _STREAMED.items() if now - ts > 3600]:
+        _STREAMED.pop(k, None)
+    if sid and sid in _STREAMED:
+        log.warning("inbound dupliqué pour CallSid=%s -> pas de second Stream", sid)
+        return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response/>',
+                        media_type="application/xml")
+    if sid:
+        _STREAMED[sid] = now
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Response><Connect><Stream url="wss://' + PUBLIC_HOST + '/telnyx/stream" '
