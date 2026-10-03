@@ -71,7 +71,14 @@ async def _build():
     STATE["reservation"] = CallIngestAdapter(client, restaurant_phone=RESTO_PHONE)
     STATE["context_port"] = BackendRestaurantContextAdapter(client)
     STATE["session_factory"] = build_session_factory(llm, reservation_port=STATE["reservation"])
-    STATE["answerer"] = QuestionAnswerer(llm)
+    # Base de connaissances du restaurant (PR #3) : passages écrits par le
+    # restaurateur pour les questions hors réservation ; les questions sans
+    # réponse lui sont remontées. Le port ne lève jamais : backend injoignable
+    # = base vide, l'appel continue.
+    from hikky.adapters.back.knowledge_adapter import BackendKnowledgeAdapter
+    knowledge = BackendKnowledgeAdapter(client, restaurant_phone=RESTO_PHONE)
+    STATE["answerer"] = QuestionAnswerer(llm, knowledge=knowledge)
+    log.info("base de connaissances branchée (%s)", RESTO_PHONE)
     STATE["phraseur"] = Phraseur(llm)
     STATE["extractor"] = LLMSlotExtractor(llm)
     STATE["http"] = httpx.AsyncClient(timeout=60.0)

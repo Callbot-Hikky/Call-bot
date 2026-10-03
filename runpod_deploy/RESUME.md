@@ -21,6 +21,11 @@ et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
 - Dernier pod (`8b10kksz3ra5iw`) pour mémoire : A40 48 Go, image `runpod/pytorch:2.4.0-py3.11-cuda12.4.1`,
   SSH `ssh -i ~/.ssh/id_ed25519 root@194.68.245.239 -p 22145`, proxy `https://8b10kksz3ra5iw-19123.proxy.runpod.net`.
   Note : sshd peut mettre ~4-5 min à répondre après le démarrage d'un pod neuf.
+- **Accès SSH partagé** : clés publiques autorisées dans `runpod_deploy/authorized_keys.pub`
+  (Rayane + coéquipier `jugurta-pc`). Sur le pod courant elles sont dans `/root/.ssh/authorized_keys`
+  — `/root` n'est PAS sur le volume : au prochain rebuild, passer les DEUX clés dans
+  `--env "PUBLIC_KEY=$(cat runpod_deploy/authorized_keys.pub)"` (ou coller le fichier dans la
+  variable PUBLIC_KEY du pod via l'interface web, « Edit Pod », pour survivre à un redémarrage).
 - Un pod arrêté ne redémarre souvent PAS (« not enough free GPUs on the host ») → l'interface
   web permet un démarrage à 0 GPU pour récupérer le volume avant suppression.
 - Port SSH direct peut changer : `runpodctl pod list` + API GraphQL pour les ports
