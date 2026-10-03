@@ -56,9 +56,13 @@ class TestRefus:
             "non pas vraiment",
             "négatif",
             "plutôt pas",
-            "je préfère changer",
         ):
             assert is_refusal(phrase), phrase
+        # « Je préfère changer » n'est plus un refus mais une CORRECTION : pendant
+        # la confirmation, les deux mènent au même endroit (on corrige), mais hors
+        # confirmation « changer » ne doit rien refuser.
+        from hikky.domain.question_router import is_correction
+        assert is_correction("je préfère changer") and not is_refusal("je préfère changer")
 
 
 class TestAmbiguite:
