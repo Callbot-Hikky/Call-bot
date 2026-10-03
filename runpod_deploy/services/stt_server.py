@@ -23,7 +23,17 @@ def load():
 
 @app.on_event("startup")
 def _warm():
-    load()
+    proc, model = load()
+    # Première inférence à froid mesurée à 5 s en appel réel (noyaux CUDA, allocateur) :
+    # la 1re phrase du client était découpée et perdue. On paie ce coût au boot, pas
+    # sur le client. Deux longueurs pour couvrir les tailles de graphe courantes.
+    t = time.time()
+    for secs in (2.0, 4.0):
+        audio = (np.random.default_rng(0).standard_normal(int(16000 * secs)) * 0.01).astype(np.float32)
+        inputs = proc(audio, sampling_rate=16000, language="fr-FR").to(model.device, dtype=model.dtype)
+        with torch.no_grad():
+            model.generate(**inputs, return_dict_in_generate=True)
+    print(f"[stt] prechauffage en {time.time()-t:.1f}s", flush=True)
 
 
 @app.post("/transcribe")
