@@ -16,6 +16,7 @@ réellement une question.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -209,11 +210,19 @@ async def run_routed_turn(
 ) -> TurnOutcome:
     # 1. Comprendre — seul rôle du modèle sur un tour ordinaire.
     slots: dict[str, Any] = {}
+    seul_le_nom_manque = session.intent.missing_slots() == {"customer_name"}
     if extractor is not None:
         slots = await extractor.extract(user_text)
-        if slots:
-            conversation.info("  extrait : %s", slots)
-            session.apply_slots(slots)
+    if seul_le_nom_manque and "customer_name" not in slots:
+        # On vient de demander le nom : une réponse d'un mot (« Royal. ») EST le nom,
+        # même si l'extracteur LLM ne l'a pas reconnu comme tel (observé en appel réel :
+        # le bot a redemandé le nom au client qui venait de le donner).
+        nom = _nom_depuis_reponse_courte(user_text)
+        if nom:
+            slots = {**slots, "customer_name": nom}
+    if slots:
+        conversation.info("  extrait : %s", slots)
+        session.apply_slots(slots)
 
     # Plafond de groupe : au-delà, l'assistant ne prend pas la réservation par
     # téléphone. On refuse tôt et clairement, plutôt que de proposer d'autres
@@ -308,7 +317,12 @@ async def run_routed_turn(
     # de dire. Sans ce dernier point, le bot récitait la même phrase quel
     # que soit l'interlocuteur : c'est ce qui le faisait sonner robotique.
     figee = phrase_for_slot(decision.slot or "", recent_phrasings or set())
-    if phraseur is not None:
+    # Le modèle n'est consulté que s'il a quelque chose à accuser réception
+    # (un slot vient d'être compris). Phrase incomprise → rien à reformuler ; et
+    # la demande du nom est déjà naturelle en figé. Sinon on attendait 1,2 s le
+    # modèle pour retomber sur la phrase figée — observé 2× sur un appel.
+    a_quelque_chose_a_dire = bool(slots) and decision.slot != "customer_name"
+    if phraseur is not None and a_quelque_chose_a_dire:
         reply = await phraseur.formuler(
             Intention(
                 besoin="demander_slot",
@@ -326,6 +340,43 @@ async def run_routed_turn(
     return TurnOutcome(
         should_end=False, awaiting_confirmation=awaiting_confirmation, slots=slots
     )
+
+
+# Formules qui entourent un nom au téléphone ; on ne garde que le nom.
+_FORMULES_NOM = re.compile(
+    r"^(c'est |c’est |je m'appelle |je m’appelle |au nom de |pour |"
+    r"monsieur |madame |mademoiselle |m\. |mme |mr |mlle )+",
+    re.IGNORECASE,
+)
+# Réponses courtes qui ne sont PAS un nom : acquiescements, politesse, nombres,
+# moments. Un nom ne contient ni chiffre ni ces mots.
+_PAS_UN_NOM = re.compile(
+    r"\d|\b(oui|non|ok|d'accord|pardon|quoi|comment|heures?|midi|minuit|soir|matin|"
+    r"demain|aujourd'hui|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|"
+    r"personnes?|couverts?|table|réserv\w*|merci|bonjour|allo|allô|attendez|"
+    r"un|deux|trois|quatre|cinq|six|sept|huit|neuf|dix|vingt|trente)\b",
+    re.IGNORECASE,
+)
+
+
+def _nom_depuis_reponse_courte(user_text: str) -> str | None:
+    """Le nom donné en réponse directe à « À quel nom ? », ou None.
+
+    Trois mots au plus, lettres seulement (tirets et apostrophes admis), sans
+    vocabulaire d'heure, de nombre ou d'acquiescement. Volontairement strict :
+    un faux nom retenu réserverait sous une mauvaise identité, alors qu'un nom
+    manqué coûte juste une redemande.
+    """
+    texte = (user_text or "").strip().strip(".!?,;: ").strip()
+    texte = _FORMULES_NOM.sub("", texte).strip()
+    if not texte or len(texte) > 40 or _PAS_UN_NOM.search(texte):
+        return None
+    mots = texte.split()
+    if not 1 <= len(mots) <= 3:
+        return None
+    if not all(re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’-]*", m) for m in mots):
+        return None
+    return " ".join(m[:1].upper() + m[1:] for m in mots)
 
 
 def _reservation_engagee(intent: Any) -> bool:
