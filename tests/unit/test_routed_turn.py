@@ -115,7 +115,9 @@ async def test_a_question_during_a_booking_resumes_the_missing_slot():
     dits = []
     await _run(s, "Vous avez une terrasse ?", dits, answerer=a)
     assert dits[0].startswith("Oui, nous avons une terrasse.")
-    assert dits[0].endswith("?") and "personne" in dits[0].lower(), dits[0]
+    # La relance porte sur le nombre de convives ; la formulation est tirée au
+    # sort parmi plusieurs variantes (« personnes », « serez-vous à table »…).
+    assert dits[0].endswith("?") and ("personne" in dits[0].lower() or "combien" in dits[0].lower()), dits[0]
 
 
 def test_no_relance_twice_in_a_row():
