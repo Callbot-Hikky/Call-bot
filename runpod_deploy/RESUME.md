@@ -5,11 +5,15 @@ sur le pod** : ce dossier contient les fichiers exacts qui tournent. Les modèle
 et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
 
 ## Accès au pod
-- **AUCUN POD (2026-10-02)** : `hikky-bot-4` (`4syj7wqd2o39x8`) et `hikky-bot-5` (`8b10kksz3ra5iw`)
-  SUPPRIMÉS pour couper la facturation (un pod arrêté facture encore ~24 $/mois de volume).
-  Prochaine session = « Rebuild from scratch » ci-dessous, puis mettre à jour ce bloc
-  (id, IP/port SSH, `PUBLIC_HOST` dans `run_telnyx.sh` — il vaut encore
-  `8b10kksz3ra5iw-19123.proxy.runpod.net`, OBSOLÈTE).
+- Pod ACTUEL : `hikky-bot-6` = `e1yc63e2u7dqxw` (A40 48 Go, SE, image
+  `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`), reconstruit 2026-10-03 en 25 min
+  via `runpodctl create pod` + `scratchpad/pod_setup.sh` (recette ci-dessous, désormais scriptée :
+  copie de `runpod_deploy/pod_setup.sh`).
+- SSH : `ssh -i ~/.ssh/id_ed25519 root@194.68.245.59 -p 22062` ; proxy
+  `https://e1yc63e2u7dqxw-19123.proxy.runpod.net` ; `PUBLIC_HOST` exporté dans `run_telnyx.sh`
+  (ligne orchestrateur). Telnyx `voice_url` à PATCHer vers ce proxy à chaque nouveau pod.
+- Historique : `hikky-bot-4` (`4syj7wqd2o39x8`) et `hikky-bot-5` (`8b10kksz3ra5iw`) SUPPRIMÉS le
+  2026-10-02 pour couper la facturation (un pod arrêté facture encore ~24 $/mois de volume).
 - Perdu avec le pod : `/workspace/emotion_lab/` et `/workspace/voice_lab/` (scripts et WAV).
   Les conclusions sont dans les items 12 et 14 ; à regénérer (~10 min) si l'écoute aveugle
   des voix (vivian / ryan / ono_anna) est encore voulue. Leçon : versionner les labos

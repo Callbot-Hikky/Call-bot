@@ -8,5 +8,5 @@ setsid bash -c "export HF_HOME=/workspace/hf; export LD_LIBRARY_PATH=$CUDNN:\$LD
 # TTS (venv-telnyx)
 setsid bash -c "export HF_HOME=/workspace/hf; export TTS_FAST=1; exec /workspace/venv-telnyx/bin/uvicorn tts_server:app --host 127.0.0.1 --port 8802" </dev/null >/workspace/tts.log 2>&1 & disown
 # Orchestrateur (venv-bot)
-setsid bash -c "export HF_HOME=/workspace/hf; export TTS_STREAM=1; exec /workspace/venv-bot/bin/uvicorn telnyx_bot:app --host 0.0.0.0 --port 19123" </dev/null >/workspace/orch_new.log 2>&1 & disown
+setsid bash -c "export HF_HOME=/workspace/hf; export TTS_STREAM=1; export PUBLIC_HOST=e1yc63e2u7dqxw-19123.proxy.runpod.net; exec /workspace/venv-bot/bin/uvicorn telnyx_bot:app --host 0.0.0.0 --port 19123" </dev/null >/workspace/orch_new.log 2>&1 & disown
 echo "3 services lances"
