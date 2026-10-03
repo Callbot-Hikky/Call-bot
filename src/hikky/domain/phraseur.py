@@ -72,6 +72,17 @@ _AFFIRMATION = re.compile(
 )
 
 
+# Le modèle n'a qu'un slot à demander ; tout objet hors réservation est inventé.
+# Observé en appel réel : « Vous prendrez ces plats pour combien de personnes… ? »
+# alors que rien n'avait été commandé. Une phrase qui parle de plats, menu ou
+# commande ne peut pas être une simple demande de créneau : repli.
+_HORS_SUJET = re.compile(
+    r"\b(plats?|menus?|commandes?|command[ée]e?s?|boissons?|desserts?|entr[ée]es?|"
+    r"livraisons?|livr[ée]e?s?|à emporter|addition|paiements?|payer|carte des vins)\b",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Intention:
     """Ce que le code a décidé de dire, avant sa mise en mots.
@@ -137,5 +148,8 @@ class Phraseur:
         # La phrase figée, elle, est toujours une vraie question correcte.
         if not phrase.rstrip().endswith("?") or _AFFIRMATION.search(phrase):
             logger.info("formulation affirme/confirme au lieu de demander — repli: %r", phrase)
+            return repli
+        if _HORS_SUJET.search(phrase):
+            logger.info("formulation hors réservation (plats, commande…) — repli: %r", phrase)
             return repli
         return phrase

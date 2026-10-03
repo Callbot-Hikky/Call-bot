@@ -223,3 +223,78 @@ async def test_group_over_cap_is_refused_clearly_without_booking():
     assert dits and "plus de 10 personnes" in dits[-1]
     assert "autre heure" not in dits[-1]
     assert outcome.should_end is False
+
+
+# ── Appel du 2026-10-03 : « À quel nom ? » — « Royal. » — « Puis-je avoir votre nom ? »
+
+
+class FakePhraseur:
+    def __init__(self) -> None:
+        self.appels = []
+
+    async def formuler(self, intention):
+        self.appels.append(intention.slot)
+        return intention.repli
+
+
+def _sans_nom():
+    return FakeSession(
+        ReservationIntent()
+        .with_date(date(2026, 10, 4))
+        .with_time(time(21))
+        .with_party_size(4)
+    )
+
+
+async def test_un_mot_seul_en_reponse_a_la_demande_du_nom_est_le_nom():
+    s = _sans_nom()
+    dits = []
+    await _run(s, "Royal.", dits)  # l'extracteur LLM n'a rien vu : c'est le code qui retient
+    assert s.intent.customer_name == "Royal"
+    # Tout est connu : le bot récapitule au lieu de redemander le nom.
+    assert "c'est bien cela" in dits[-1].lower()
+    assert "royal" in dits[-1].lower()
+
+
+async def test_le_nom_court_est_nettoye_des_formules():
+    s = _sans_nom()
+    await _run(s, "au nom de Dupont", [])
+    assert s.intent.customer_name == "Dupont"
+
+
+async def test_une_reponse_courte_qui_n_est_pas_un_nom_n_est_pas_retenue():
+    for texte in ("oui", "vingt-deux heures", "demain", "pardon ?", "4 personnes"):
+        s = _sans_nom()
+        await _run(s, texte, [])
+        assert s.intent.customer_name is None, texte
+
+
+async def test_le_nom_n_est_pas_devine_quand_un_autre_slot_manque():
+    s = FakeSession(ReservationIntent().with_date(date(2026, 10, 4)))
+    await _run(s, "Royal.", [])
+    assert s.intent.customer_name is None
+
+
+async def test_le_phraseur_n_est_pas_sollicite_sans_rien_a_accuser():
+    """Rien d'extrait (phrase incomprise) : attendre 1,2 s le modèle pour retomber
+    sur la phrase figée est du temps perdu — observé 2× sur un appel."""
+    p = FakePhraseur()
+    s = FakeSession(ReservationIntent().with_date(date(2026, 10, 4)))
+    await run_routed_turn(
+        session=s, user_text="Vingt-deux et neuf.", customer_phone=None, history=[],
+        extractor=FakeExtractor(), answerer=FakeAnswerer(), awaiting_confirmation=False,
+        speak=lambda t: _noop(), phraseur=p,
+    )
+    assert p.appels == []
+
+
+async def test_le_phraseur_est_sollicite_quand_il_y_a_quelque_chose_a_accuser():
+    p = FakePhraseur()
+    s = FakeSession(ReservationIntent())
+    e = FakeExtractor({"demain soir": {"date": date(2026, 10, 4)}})
+    await run_routed_turn(
+        session=s, user_text="demain soir", customer_phone=None, history=[],
+        extractor=e, answerer=FakeAnswerer(), awaiting_confirmation=False,
+        speak=lambda t: _noop(), phraseur=p,
+    )
+    assert p.appels == ["time"]

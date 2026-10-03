@@ -135,3 +135,14 @@ async def test_le_modele_ne_peut_pas_inventer_une_confirmation():
 
     assert dit == "Je récapitule : 2 personnes demain à midi. C'est bien cela ?"
     assert modele.prompts == [], "le modele ne doit pas etre consulte ici"
+
+
+async def test_le_modele_ne_peut_pas_parler_de_plats_en_demandant_un_slot():
+    """Observé en appel réel : « Vous prendrez ces plats pour combien de personnes
+    et à quelle heure souhaitez-vous venir ? » — rien n'a été commandé."""
+    intention = _intention(slot="party_size")
+    modele = _ModeleFidele(
+        "Vous prendrez ces plats pour combien de personnes et à quelle heure souhaitez-vous venir ?"
+    )
+    dit = await Phraseur(modele).formuler(intention)
+    assert dit == intention.repli
