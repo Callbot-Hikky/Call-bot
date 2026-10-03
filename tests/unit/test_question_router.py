@@ -224,3 +224,30 @@ def test_phrasing_avoids_recently_used_wording():
     premiere = phrase_for_slot("time", set())
     seconde = phrase_for_slot("time", {premiere})
     assert seconde != premiere
+
+
+# Appel du 2026-10-03 16:56 : deux questions sur le végétarien routées en « quel jour ? ».
+QUESTIONS_INDIRECTES_OU_MAL_ENTENDUES = [
+    # Question indirecte : « demander si » n'était pas une tournure reconnue.
+    "Je voulais demander si le restaurant propose des plats végétariens ou végan.",
+    "Je voudrais demander si vous avez une terrasse.",
+    # « Est-ce que » transcrit « Parce que » par le STT : le sujet (le restaurant +
+    # un thème) suffit — personne n'informe le bot sur son propre restaurant.
+    "Parce que le restaurant propose des plats végétariens, ou végan.",
+    "Le restaurant propose des plats halal.",
+    "Le restaurant accepte les chiens ?",
+]
+
+
+@pytest.mark.parametrize("texte", QUESTIONS_INDIRECTES_OU_MAL_ENTENDUES)
+def test_une_question_indirecte_ou_mal_entendue_reste_une_question(texte):
+    assert is_client_question(texte), texte
+
+
+@pytest.mark.parametrize("texte", [
+    "Le restaurant, c'est pour demain soir.",
+    "Parce que nous serons quatre.",
+    "On sera six personnes.",
+])
+def test_une_reponse_sur_la_reservation_n_est_pas_une_question(texte):
+    assert not is_client_question(texte), texte

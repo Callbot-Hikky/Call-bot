@@ -80,13 +80,23 @@ _QUESTION_FORTE = (
     "je voulais savoir", "je voudrais savoir", "j'aimerais savoir",
     "je veux savoir", "savoir si", "une question", "je me demandais",
     "dites-moi", "c'est possible", "possible de",
+    # Question indirecte, observée en appel réel et routée à tort en réponse :
+    # « Je voulais demander si le restaurant propose des plats végétariens ».
+    "demander si", "je voulais demander", "je voudrais demander",
+    "j'aimerais demander", "je peux demander", "puis-je demander",
 )
 
 # Tournures qui n'interrogent que si le sujet est un fait du restaurant.
+# « le restaurant » à la troisième personne en fait partie : personne n'appelle
+# pour INFORMER le bot sur son propre restaurant — « Le restaurant propose des
+# plats halal. » est une question dont le STT a perdu l'intonation (ou a
+# transcrit « Parce que » pour « Est-ce que », observé en appel réel).
 _QUESTION_FAIBLE = re.compile(
     r"(?<!\w)(c'est|est|sont|ont|a|il y a|y a|vous avez|vous êtes|vous etes|"
     r"vous faites|vous acceptez|vous proposez|vous servez|vous prenez|"
-    r"vous livrez|on peut|je peux|possible|ouverts?|ouvertes?)(?!\w)"
+    r"vous livrez|on peut|je peux|possible|ouverts?|ouvertes?|"
+    r"le restaurant|l'établissement|l'etablissement|chez vous|"
+    r"propose\w*|accepte\w*|dispose\w*|poss[èe]de\w*|sert|servent)(?!\w)"
 )
 
 # Ce dont un client s'enquiert au téléphone, hors créneau de réservation.
