@@ -9,7 +9,11 @@ from pydantic import BaseModel
 os.environ.setdefault("HF_HOME", "/workspace/hf")
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 SPEAKER = "ono_anna"
-INSTRUCT = "Ton chaleureux et professionnel d une hotesse de restaurant francais"
+# Instruction en ANGLAIS, sobre. Mesuré le 2026-10-03 (debug/runaway_*.json, 60 synthèses
+# de phrases courtes par variante) : avec l'instruction française, 6 emballements dont
+# 12,8 s ; en anglais sobre, 1 emballement ; combinée à l'arrêt sur boucle (fast_tts),
+# pire cas 4,5 s. Le labo émotions avait déjà vu que l'instruction française sur-joue.
+INSTRUCT = os.environ.get("TTS_INSTRUCT", "Speak in a warm, calm and professional tone, like a restaurant host.")
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True

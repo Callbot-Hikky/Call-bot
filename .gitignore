@@ -220,3 +220,4 @@ __marimo__/
 # Documents générés par Claude — ne jamais committer
 docs/superpowers/
 .demo-artifact/
+HANDOFF_HIKKY.md
