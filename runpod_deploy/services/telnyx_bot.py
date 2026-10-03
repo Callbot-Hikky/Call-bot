@@ -146,6 +146,11 @@ async def stream(ws: WebSocket):
     bargein = 0
     preroll = bytearray()   # ~400ms d'audio REEL avant l'attaque (le VAD energie rogne le 1er mot)
     PREROLL_BYTES = 6400    # 0.4s @ 8kHz PCM16
+    # Un seul tour à la fois : deux énoncés rapprochés (STT à froid, phrase coupée) lançaient
+    # deux do_turn concurrents -> deux réponses parlées l'une sur l'autre.
+    turn_lock = asyncio.Lock()
+    call_tag = time.strftime("%H%M%S")
+    utter_n = 0
 
     async def send_ulaw(frames):
         # Telnyx bufferise et joue lui-meme ; 1 message media / seconde max.
@@ -179,6 +184,8 @@ async def stream(ws: WebSocket):
         # au fil de l eau. Reechantillonnage a etat continu (pas de clic entre chunks).
         rate_state = None
         sent_any = False
+        t0 = time.time()
+        n_frames = 0
         try:
             async with STATE["http"].stream("POST", TTS_STREAM_URL, json={"text": text}) as resp:
                 buf = bytearray()
@@ -196,6 +203,7 @@ async def stream(ws: WebSocket):
                         frames = [mu[i:i + 160] for i in range(0, len(mu), 160)]
                         if frames and not stop_flag["v"]:
                             sent_any = True
+                            n_frames += len(frames)
                             await send_ulaw(frames)
         except Exception as e:
             log.warning("stream TTS echoue (%s)%s", e,
@@ -204,6 +212,10 @@ async def stream(ws: WebSocket):
                 pcm, sr = await synth_pcm(text)
                 if not stop_flag["v"]:
                     await send_ulaw(pcm_to_ulaw_frames(pcm, sr))
+        finally:
+            log.info("stream fini: %d frames (%.1fs audio) en %.1fs%s", n_frames,
+                     n_frames * 0.02, time.time() - t0,
+                     " COUPE (barge-in)" if stop_flag["v"] else "")
 
     async def speak(text: str):
         if not text:
@@ -217,7 +229,31 @@ async def stream(ws: WebSocket):
             return
         await send_ulaw(pcm_to_ulaw_frames(pcm, sr))
 
+    def _dump(buf: bytes, n: int) -> str:
+        # Chaque énoncé en WAV 8 kHz pour écoute/mesure hors ligne (/workspace/debug).
+        # C'est la seule façon de trancher entre « STT sourd » et « VAD qui coupe ».
+        try:
+            import wave
+            os.makedirs("/workspace/debug", exist_ok=True)
+            path = f"/workspace/debug/{call_tag}_{n:02d}.wav"
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+                w.writeframes(buf)
+            return path
+        except Exception as e:  # noqa: BLE001 - le debug ne doit jamais casser l'appel
+            return f"(dump échoué: {e})"
+
     async def do_turn(buf: bytes):
+        nonlocal awaiting, utter_n
+        utter_n += 1
+        n = utter_n
+        path = _dump(buf, n)
+        log.info("énoncé #%d : %.2fs, rms=%d, max=%d -> %s", n, len(buf) / 16000,
+                 audioop.rms(buf, 2), audioop.max(buf, 2), path)
+        async with turn_lock:
+            await _do_turn_locked(buf)
+
+    async def _do_turn_locked(buf: bytes):
         nonlocal awaiting
         buf16 = _to16k(buf)
         # Silence en QUEUE seulement : vide le contexte droit (lookahead) de Nemotron.
@@ -269,6 +305,7 @@ async def stream(ws: WebSocket):
             if speaking and rms > BARGE_THRESH:
                 bargein += 1
                 if bargein >= BARGE_MIN_FRAMES:
+                    log.info("barge-in : le client parle (rms=%d), bot coupé", rms)
                     stop_flag["v"] = True
                     await ws.send_text(json.dumps({"event": "clear"}))
                     bargein = 0
@@ -291,6 +328,11 @@ async def stream(ws: WebSocket):
                     silence = 0
                     if n >= MIN_SPEECH and not speaking:
                         asyncio.create_task(do_turn(buf))
+                    elif n >= MIN_SPEECH:
+                        # Le client a parlé pendant que le bot parlait, sans franchir le seuil
+                        # de barge-in : énoncé perdu. Tracé pour mesurer la fréquence du cas.
+                        log.info("énoncé ignoré (bot en train de parler) : %d frames, %.1fs",
+                                 n, len(buf) / 16000)
             preroll += pcm
             if len(preroll) > PREROLL_BYTES:
                 del preroll[:len(preroll) - PREROLL_BYTES]
