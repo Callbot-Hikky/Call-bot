@@ -8,6 +8,8 @@ le STT, etc. — tout le câblage concret vit ici.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 from hikky.adapters.back.call_log_adapter import BackHttpCallLogAdapter
@@ -26,14 +28,29 @@ from hikky.domain.dialogue_engine import DialogueEngine
 from hikky.domain.fallback_policy import FallbackPolicy
 from hikky.domain.restaurant_context import RestaurantContext
 from hikky.pipeline.llm_slot_extractor import LLMSlotExtractor
+from hikky.ports.restaurant_context import RestaurantContextPort
+from hikky.ports.speech_recognition import SpeechRecognitionPort
+from hikky.ports.speech_synthesis import SpeechSynthesisPort
+
+
+@dataclass(slots=True)
+class AppDependencies:
+    """Briques injectées dans l'app — mockables en test."""
+
+    stt_adapter: SpeechRecognitionPort
+    tts_adapter: SpeechSynthesisPort
+    restaurant_context_port: RestaurantContextPort
+    session_factory: Callable[[str, object], CallSession]
+    # session_factory(call_sid, restaurant_context) -> CallSession câblée
+
+    slot_extractor: object | None = None  # SlotExtractor concret (LLM-driven en prod)
+    tts_sample_rate: int = 22050
 
 
 def build_app_dependencies(config: AppConfig):
     """Construit `AppDependencies` à partir de la config. À appeler une
     seule fois au démarrage de l'app — les adapters de modèles font
     leur lazy-load au premier vrai appel."""
-
-    from hikky.app.main import AppDependencies
 
     back_client = BackHttpClient(
         base_url=config.back_base_url,
