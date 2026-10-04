@@ -24,13 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import threading, asyncio, faulthandler, signal
 import queue as _queue
 faulthandler.register(signal.SIGUSR1, all_threads=True)  # kill -USR1 <pid> -> piles de tous les threads
-try:
-    import streaming_engine as _se
-    _STREAM_OK = True
-except Exception as _e:
-    _se = None
-    _STREAM_OK = False
-    print("[tts] streaming_engine indisponible: %s" % _e, flush=True)
+import streaming_engine as _se   # fichier du dépôt : absent = copie ratée, on échoue au démarrage
 
 _model = None
 _fast = None
