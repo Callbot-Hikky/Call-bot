@@ -1,21 +1,28 @@
-# Hikky callbot — état & reprise (sauvegarde 2026-09-17)
+# Hikky callbot — état & reprise (sauvegarde 2026-09-17, pod mis à jour 2026-10-04)
 
 Sauvegarde de tout le code déployé sur le pod RunPod. **Rien d'irremplaçable n'est
 sur le pod** : ce dossier contient les fichiers exacts qui tournent. Les modèles
 et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
 
 ## Accès au pod
-- **2026-10-04 00:50 : pod `hikky-bot-6` ARRÊTÉ** (facturation GPU coupée ; le volume de 120 Go
-  reste facturé ~24 $/mois tant que le pod existe). Un pod arrêté redémarre rarement (pas de
-  GPU libre) → prévoir un rebuild (`pod_setup.sh`, 25 min) et le PATCH Telnyx du `voice_url`.
-  Le code du pod = `main` + `TZ=Europe/Paris` ; base de connaissances branchée.
-- Pod ACTUEL : `hikky-bot-6` = `e1yc63e2u7dqxw` (A40 48 Go, SE, image
-  `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`), reconstruit 2026-10-03 en 25 min
-  via `runpodctl create pod` + `scratchpad/pod_setup.sh` (recette ci-dessous, désormais scriptée :
-  copie de `runpod_deploy/pod_setup.sh`).
-- SSH : `ssh -i ~/.ssh/id_ed25519 root@194.68.245.59 -p 22062` ; proxy
-  `https://e1yc63e2u7dqxw-19123.proxy.runpod.net` ; `PUBLIC_HOST` exporté dans `run_telnyx.sh`
-  (ligne orchestrateur). Telnyx `voice_url` à PATCHer vers ce proxy à chaque nouveau pod.
+- **Pod ACTUEL (2026-10-04) : `hikky-bot-7` = `apv5oebaknccuj`** (A40 48 Go, SECURE, SE, image
+  `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`, volume /workspace 120 Go, container 30 Go),
+  reconstruit en 21 min via `runpodctl pod create` + `runpod_deploy/pod_setup.sh` (SETUP_DONE), puis
+  code local déployé par `rsync -rltz` (PAS `-a` : le chown échoue sur le volume ; `apt-get install rsync`
+  d'abord, l'image n'en a pas).
+- SSH : `ssh -i ~/.ssh/id_ed25519 root@194.68.245.39 -p 22135` (alias local `hikky-pod7` dans `~/.ssh/config`) ;
+  proxy `https://apv5oebaknccuj-19123.proxy.runpod.net` ; `PUBLIC_HOST` déjà exporté dans `run_telnyx.sh`.
+  Telnyx `voice_url` à PATCHer vers `https://apv5oebaknccuj-19123.proxy.runpod.net/telnyx/inbound`.
+- L'orchestrateur tourne sur **`telnyx_pipeline.server:app`** (paquet `services/telnyx_pipeline/`,
+  lancé par `run_telnyx.sh` ; l'ancien `telnyx_bot.py` est supprimé). Config lue depuis
+  `/workspace/bot_back.env` (KEY=VALUE sans `export`) + env ; `config.py` arrête le processus si
+  `PUBLIC_HOST` ou `HIKKY_BACK_BASE_URL` manque. STT = faster-whisper large-v3 (:8801), TTS :8802.
+- Piège confirmé au boot : `run_telnyx.sh` lance les 3 en même temps → « cache salutation échoué »
+  (TTS pas prêt). Relancer l'orchestrateur seul par PID (`ss -tlnp | grep :19123` → `kill -9`) une fois
+  `curl localhost:8802/health` OK → « salutation cachée: 204 frames ».
+- Historique : `hikky-bot-6` = `e1yc63e2u7dqxw` (A40, SE), arrêté le 2026-10-04 00:50 puis disparu
+  (`runpodctl pod list` vide) ; SSH était `root@194.68.245.59 -p 22062`,
+  proxy `https://e1yc63e2u7dqxw-19123.proxy.runpod.net`.
 - Historique : `hikky-bot-4` (`4syj7wqd2o39x8`) et `hikky-bot-5` (`8b10kksz3ra5iw`) SUPPRIMÉS le
   2026-10-02 pour couper la facturation (un pod arrêté facture encore ~24 $/mois de volume).
 - Perdu avec le pod : `/workspace/emotion_lab/` et `/workspace/voice_lab/` (scripts et WAV).
@@ -34,6 +41,11 @@ et venvs sont volumineux mais reproductibles (voir "Rebuild from scratch").
   web permet un démarrage à 0 GPU pour récupérer le volume avant suppression.
 - Port SSH direct peut changer : `runpodctl pod list` + API GraphQL pour les ports
   (`curl "https://api.runpod.io/graphql?api_key=$KEY" -d '{"query":"query{pod(input:{podId:\"uv9jklqxm6vwnj\"}){runtime{ports{ip privatePort publicPort type}}}}"}'`)
+
+- **Orchestrateur en Python 3.13** (2026-10-04) : `/workspace/venv-bot313` (uv, Python sur le volume,
+  `audioop-lts`, llama-cpp-python 0.3.36 compilé CUDA ~15 min). Raison : `audioop` retiré de la stdlib
+  en 3.13, roues llama-cpp jusqu'à cp312 seulement. Repli : `/workspace/venv-bot` (3.11) encore présent
+  sur le pod 7. Validé par appel réel 19:36.
 
 ## Architecture (3 services sur le pod, /workspace)
 | Service | Port | venv | Rôle |
@@ -54,7 +66,7 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
    (sous-talker 15 pas en 1 replay, greedy ; codebook0 garde le sampling complet).
    Activé par `TTS_FAST=1`. Fallback = `generate_custom_voice`.
 4. **Streaming TTS** (`fast_tts.generate_stream` + `/synthesize_stream` framing
-   longueur-préfixée + `telnyx_bot.speak_stream`) : **TTFA ~0,55 s** (le bot parle
+   longueur-préfixée + `speaker.py`) : **TTFA ~0,55 s** (le bot parle
    pendant qu'il génère). Chunks de 16 frames (~1,3 s) > écart Telnyx 1,05 s (anti-trou).
    Rééchantillonnage à état continu (pas de clic). Activé par `TTS_STREAM=1`. Fallback auto.
 5. **Robustesse** : STT vide → le bot redemande ("pouvez-vous répéter ?") au lieu de
@@ -213,7 +225,7 @@ LLM 32B : préchauffage ~70-80 s au boot avant "orchestrateur pret".
   Ceux AVEC copie (superposée) : `phraseur.py`, `conversation_brain.py`, `routed_turn.py`.
 
 ## Fichiers de ce dossier (= ce qui tourne sur le pod)
-- `services/telnyx_bot.py` — orchestrateur (WS Telnyx, A-law, streaming speak, robustesse)
+- `services/telnyx_pipeline/` — orchestrateur découpé en 8 modules (voir son README.md)
 - `services/tts_server.py` — serveur TTS (/synthesize + /synthesize_stream, flags TTS_FAST)
 - `services/fast_tts.py` — moteur CUDA graphs (generate + generate_stream)
 - `services/optimized_talker.py` — TalkerGraph + PredictorGraph (bug lazy_init corrigé au runtime dans fast_tts)

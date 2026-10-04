@@ -2,8 +2,11 @@
 name = "hikky"
 version = "0.1.0"
 description = "Hikky — callbot vocal pour restaurants (dépôt IA)"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
+    # audioop (codec G.711 du pipeline téléphonique) est retiré de la stdlib en 3.13 :
+    # audioop-lts est son backport officiel, même API, même nom d'import.
+    "audioop-lts>=0.2",
     "pydantic>=2.7",
     "httpx>=0.27",
     "fastapi>=0.110",

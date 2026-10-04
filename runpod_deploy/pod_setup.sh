@@ -17,11 +17,21 @@ step "téléchargements modèles (en parallèle)"
 ( hf download nvidia/nemotron-3.5-asr-streaming-0.6b >/workspace/dl_stt.log 2>&1 && echo "DL_STT_OK" || echo "DL_STT_FAIL" ) &
 ( hf download bartowski/Qwen2.5-32B-Instruct-GGUF Qwen2.5-32B-Instruct-Q5_K_M.gguf --local-dir /workspace/models >/workspace/dl_gguf.log 2>&1 && echo "DL_GGUF_OK" || echo "DL_GGUF_FAIL" ) &
 
-step "venv-bot (llama-cpp wheel cu124)"
-python3 -m venv /workspace/venv-bot
-/workspace/venv-bot/bin/pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 2>&1 | tail -1
-/workspace/venv-bot/bin/pip install -q fastapi uvicorn httpx websockets numpy pydantic soxr 2>&1 | tail -1
-/workspace/venv-bot/bin/python -c "from llama_cpp import llama_supports_gpu_offload as f; print('llama gpu offload:', f())"
+step "venv-bot313 (Python 3.13 : audioop-lts + llama-cpp compilé CUDA)"
+# Pourquoi 3.13 : le codec G.711 du pipeline passe par `audioop`, retiré de la stdlib en 3.13 ;
+# son backport officiel `audioop-lts` n'existe QUE pour >= 3.13. Les roues CUDA précompilées de
+# llama-cpp-python s'arrêtent à cp312 -> on compile (~15 min sur 96 coeurs, A40 = sm_86).
+# Python est installé sur le volume (/workspace/uv-python) : il survit à un redémarrage du pod.
+pip install -q uv 2>&1 | tail -1
+export UV_PYTHON_INSTALL_DIR=/workspace/uv-python
+uv python install 3.13 2>&1 | tail -1
+PY313=$(uv python find 3.13)
+uv venv /workspace/venv-bot313 --python "$PY313" 2>&1 | tail -1
+uv pip install --python /workspace/venv-bot313/bin/python -q pip audioop-lts fastapi uvicorn httpx websockets numpy pydantic soxr 2>&1 | tail -1
+PATH=/usr/local/cuda/bin:$PATH CUDACXX=/usr/local/cuda/bin/nvcc \
+  CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=86" FORCE_CMAKE=1 CMAKE_BUILD_PARALLEL_LEVEL=32 \
+  /workspace/venv-bot313/bin/python -m pip install -q --no-cache-dir "llama-cpp-python==0.3.36" 2>&1 | tail -1
+/workspace/venv-bot313/bin/python -c "import audioop, soxr; from llama_cpp import llama_supports_gpu_offload as f; print('python 3.13 | audioop:', audioop.__file__.split('/')[-3], '| llama gpu offload:', f())"
 
 step "venv-telnyx (TTS, hérite torch système)"
 python3 -m venv --system-site-packages /workspace/venv-telnyx
@@ -41,7 +51,7 @@ wait
 ls -la /workspace/models/
 du -sh /workspace/hf 2>/dev/null
 
-if [ -f /workspace/models/Qwen2.5-32B-Instruct-Q5_K_M.gguf ] && [ -x /workspace/venv-stt/bin/uvicorn ] && [ -x /workspace/venv-telnyx/bin/uvicorn ] && [ -x /workspace/venv-bot/bin/uvicorn ]; then
+if [ -f /workspace/models/Qwen2.5-32B-Instruct-Q5_K_M.gguf ] && [ -x /workspace/venv-stt/bin/uvicorn ] && [ -x /workspace/venv-telnyx/bin/uvicorn ] && [ -x /workspace/venv-bot313/bin/uvicorn ]; then
   step "SETUP_DONE"
 else
   step "SETUP_FAIL"
