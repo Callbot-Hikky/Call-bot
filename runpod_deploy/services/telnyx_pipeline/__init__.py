@@ -9,6 +9,7 @@ a UN rôle et se lit seul :
     call_state.py     l'état d'un appel : qui parle, énoncé gardé, répétitions, échecs
     inbound.py        la réponse à Telnyx quand le téléphone sonne (TeXML), un seul flux par appel
     speaker.py        faire parler le bot : flux TTS -> trames -> Telnyx, au bon rythme
+    startup.py        démarrer et arrêter : LLM, STT/TTS/backend branchés, salutation en cache
     server.py         les trois points d'entrée HTTP/WebSocket, et la boucle de l'appel
 
 Les constantes (seuils, durées) viennent d'appels réels et sont commentées là où

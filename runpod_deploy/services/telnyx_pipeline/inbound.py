@@ -15,11 +15,12 @@ EMPTY_TEXML = '<?xml version="1.0" encoding="UTF-8"?><Response/>'
 
 
 def texml_connect(public_host: str) -> str:
-    """La consigne : ouvrir un flux bidirectionnel vers notre WebSocket, en µ-law."""
+    """La consigne : ouvrir un flux bidirectionnel vers notre WebSocket, en A-law (PCMA),
+    le codec que la ligne européenne nous envoie déjà : un seul codec dans les deux sens."""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         f'<Response><Connect><Stream url="wss://{public_host}/telnyx/stream" '
-        'bidirectionalMode="rtp" bidirectionalCodec="PCMU"/></Connect></Response>'
+        'bidirectionalMode="rtp" bidirectionalCodec="PCMA"/></Connect></Response>'
     )
 
 

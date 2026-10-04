@@ -1,9 +1,10 @@
 """Conversions audio, et rien d'autre.
 
-Ce que la ligne envoie : des octets A-law (Europe) ou µ-law (États-Unis), 8 000 par
-seconde, livrés par paquets de 20 ms. Ce que nos modèles veulent : du PCM 16 bits —
-16 kHz pour la reconnaissance vocale, 24 kHz en sortie de la synthèse. Ce que Telnyx
-accepte en retour : du µ-law 8 kHz, en trames de 160 octets (= 20 ms).
+Ce que la ligne envoie : des octets G.711 — A-law (Europe) ou µ-law (États-Unis) —,
+8 000 par seconde, livrés par paquets de 20 ms. Ce que nos modèles veulent : du PCM
+16 bits — 16 kHz pour la reconnaissance vocale, 24 kHz en sortie de la synthèse.
+Ce qu'on renvoie à Telnyx : le même codec que la ligne, A-law 8 kHz (demandé dans le
+TeXML, `bidirectionalCodec="PCMA"`), en trames de 160 octets (= 20 ms).
 
 Toutes les fonctions sont pures : des octets entrent, des octets sortent.
 """
@@ -24,8 +25,10 @@ TELEPHONY_RATE = 8000  # cadence de la ligne (échantillons par seconde)
 STT_RATE = 16000  # ce que la reconnaissance vocale attend
 TTS_RATE = 24000  # ce que la synthèse produit
 FRAME_MS = 20  # durée d'un paquet Telnyx
-ULAW_FRAME_BYTES = TELEPHONY_RATE * FRAME_MS // 1000  # 160 octets µ-law = 20 ms
-PCM_FRAME_BYTES = ULAW_FRAME_BYTES * 2  # 320 octets PCM16 = 20 ms
+G711_FRAME_BYTES = (
+    TELEPHONY_RATE * FRAME_MS // 1000
+)  # 160 octets G.711 (1 octet/échantillon) = 20 ms
+PCM_FRAME_BYTES = G711_FRAME_BYTES * 2  # 320 octets PCM16 = 20 ms
 
 
 def decode_telephony(raw: bytes, *, alaw: bool) -> bytes:
@@ -49,15 +52,30 @@ def to_stt_rate(pcm8k: bytes) -> bytes:
     return soxr.resample(x, TELEPHONY_RATE, STT_RATE, quality="HQ").astype("<i2").tobytes()
 
 
-def pcm_to_ulaw_frames(pcm: bytes, rate: int) -> list[bytes]:
-    """PCM16 (à `rate` Hz) -> trames µ-law de 20 ms prêtes pour Telnyx."""
-    pcm8, _ = audioop.ratecv(pcm, 2, 1, rate, TELEPHONY_RATE, None)
-    mu = audioop.lin2ulaw(pcm8, 2)
-    return [mu[i : i + ULAW_FRAME_BYTES] for i in range(0, len(mu), ULAW_FRAME_BYTES)]
+def split_into_frames(g711: bytes) -> list[bytes]:
+    """Découpe une phrase A-law en paquets de 160 octets (= 20 ms), l'unité de Telnyx.
+
+    Pour 1 s de voix : len(g711) = 8 000 -> 50 paquets. Le dernier peut être plus
+    court si la phrase ne tombe pas sur un multiple de 20 ms ; Telnyx l'accepte.
+    """
+    frames = []
+    for start in range(0, len(g711), G711_FRAME_BYTES):  # 0, 160, 320, ... : début de chaque paquet
+        end = start + G711_FRAME_BYTES
+        frames.append(g711[start:end])  # copie les octets de `start` (inclus) à `end` (exclu)
+    return frames
+
+
+def pcm_to_telephony_frames(pcm: bytes, rate: int) -> list[bytes]:
+    """PCM16 (à `rate` Hz) -> trames A-law de 20 ms, pour une phrase complète.
+
+    Une phrase entière est un flux à un seul morceau : même code que le flux,
+    utilisé pour la salutation mise en cache et le repli quand le flux TTS échoue.
+    """
+    return StreamingDownsampler(rate).feed(pcm)
 
 
 class StreamingDownsampler:
-    """Même conversion que `pcm_to_ulaw_frames`, mais morceau par morceau.
+    """Même conversion que `pcm_to_telephony_frames`, mais morceau par morceau.
 
     Le rééchantillonneur garde son état entre deux morceaux : sans ça, chaque
     raccord fait un clic audible au téléphone.
@@ -68,9 +86,11 @@ class StreamingDownsampler:
         self._state = None
 
     def feed(self, pcm: bytes) -> list[bytes]:
+        """Un morceau PCM entre, des paquets A-law de 20 ms sortent."""
+        # 1. redimensionner (en reprenant où le morceau précédent s'est arrêté)
         pcm8, self._state = audioop.ratecv(pcm, 2, 1, self._src_rate, TELEPHONY_RATE, self._state)
-        mu = audioop.lin2ulaw(pcm8, 2)
-        return [mu[i : i + ULAW_FRAME_BYTES] for i in range(0, len(mu), ULAW_FRAME_BYTES)]
+        g711 = audioop.lin2alaw(pcm8, 2)  # 2. conversion en A-law
+        return split_into_frames(g711)  # 3. découper
 
 
 def pop_length_prefixed(buf: bytearray) -> Iterator[bytes]:

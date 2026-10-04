@@ -23,13 +23,13 @@ sequenceDiagram
 
     Client->>Telnyx: compose le numéro
     Telnyx->>Server: POST /telnyx/inbound (CallSid)
-    Server-->>Telnyx: TeXML <Connect><Stream wss://…/telnyx/stream PCMU>
+    Server-->>Telnyx: TeXML <Connect><Stream wss://…/telnyx/stream PCMA>
     Note over Server: inbound.py : un seul Stream par CallSid
     Telnyx->>Server: WS « start » (codec PCMA)
     Server->>Back: GET /api/calls/context
     Back-->>Server: horaires, attributs, règles
     Server->>Speaker: salutation (trames en cache)
-    Speaker-->>Telnyx: « media » (µ-law 8 kHz)
+    Speaker-->>Telnyx: « media » (A-law 8 kHz)
     Telnyx-->>Client: « Bonjour, vous êtes au restaurant… »
 
     loop chaque paquet de 20 ms
@@ -108,7 +108,7 @@ flowchart LR
 
     Client <-->|voix 8 kHz| Telnyx
     Telnyx -->|POST /telnyx/inbound| inbound
-    Telnyx <-->|WS /telnyx/stream<br/>media A-law ⇄ µ-law| server
+    Telnyx <-->|WS /telnyx/stream<br/>media A-law ⇄ A-law| server
     server -->|PCM 16 kHz| STT
     speaker -->|texte| TTS
     server -->|texte transcrit| Domain
@@ -160,7 +160,7 @@ stateDiagram-v2
 | pré-roll | 6 400 octets = 400 ms | `turn_detector.py` | la première syllabe n'est plus rognée |
 | énoncé gardé périmé | 6 s | `call_state.py` | le client a déjà avancé |
 | espacement des envois | 1,05 s | `speaker.py` | contrainte Telnyx (1 message/s) |
-| trame | 160 octets µ-law = 20 ms | `audio.py` | protocole Telnyx |
+| trame | 160 octets A-law = 20 ms | `audio.py` | protocole Telnyx |
 | échecs avant clôture | 3 | `repair.py` | règle « 3 no-match → humain » |
 
 ### Configuration : tout vient de l'environnement (`config.py`)

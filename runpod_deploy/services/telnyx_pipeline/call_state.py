@@ -21,6 +21,7 @@ class CallState:
     # ── identité de l'appel ──
     stream_id: str | None = None
     alaw: bool = True  # codec entrant, lu dans l'événement start
+    # pour identifier l'appel dans les journaux pour le debug
     call_tag: str = field(default_factory=lambda: time.strftime("%H%M%S"))
     session: Any = None  # la session de réservation (domaine)
 

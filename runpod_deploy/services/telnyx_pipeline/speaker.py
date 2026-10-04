@@ -1,7 +1,7 @@
 """Faire parler le bot au téléphone.
 
 Le texte part au service TTS ; la voix revient par morceaux (flux) ; chaque morceau
-est converti en trames µ-law de 20 ms et envoyé à Telnyx au rythme où il les joue.
+est converti en trames A-law de 20 ms et envoyé à Telnyx au rythme où il les joue.
 Premier son ~0,65 s après la décision, mesuré sur chaque phrase dans les journaux.
 
 Deux règles apprises en appel réel :
@@ -30,16 +30,26 @@ SPOKEN_CHARS_PER_S = 14  # pour estimer ce que le client a entendu avant de coup
 
 
 class TelnyxSpeaker:
+    """Le haut-parleur d'un appel : un texte entre, de la voix sort vers Telnyx.
+
+    Il ne crée ni le WebSocket ni le client HTTP : on les lui donne (injection de
+    dépendances). En production ce sont les vrais ; en test, deux doublures qui
+    enregistrent ce qui part, d'où 5 tests sans réseau ni GPU.
+
+    Un `TelnyxSpeaker` par appel, créé dans `server.py` à l'ouverture du WebSocket.
+    """
+
     def __init__(
         self,
         *,
-        ws: Any,
-        http: Any,
-        state: CallState,
-        tts_url: str,
-        tts_stream_url: str,
-        streaming: bool,
+        ws: Any,  # le WebSocket vers Telnyx : on y envoie les messages « media » et « clear »
+        http: Any,  # le client HTTP (httpx) : on y appelle le service TTS
+        state: CallState,  # le tableau blanc de l'appel : speaking, stop_requested, history…
+        tts_url: str,  # TTS « phrase entière » (repli, et salutation mise en cache)
+        tts_stream_url: str,  # TTS « en flux » : la voix arrive par morceaux
+        streaming: bool,  # vrai = flux (TTS_STREAM=1) ; faux = phrase entière
     ) -> None:
+        # Rien d'autre que ranger : aucun appel réseau à la construction.
         self._ws = ws
         self._http = http
         self._state = state
@@ -49,7 +59,7 @@ class TelnyxSpeaker:
 
     # ── bas niveau : des trames vers Telnyx ──────────────────────────────────
     async def send_frames(self, frames: list[bytes]) -> None:
-        """Envoie des trames µ-law en UN message, puis attend qu'elles soient jouées."""
+        """Envoie des trames A-law en UN message, puis attend qu'elles soient jouées."""
         if not frames:
             return
         state = self._state
@@ -96,7 +106,7 @@ class TelnyxSpeaker:
         if not self._streaming:
             pcm, rate = await self.synthesize(text)
             if not state.stop_requested:
-                await self.send_frames(audio.pcm_to_ulaw_frames(pcm, rate))
+                await self.send_frames(audio.pcm_to_telephony_frames(pcm, rate))
             return
         n_frames = await self._say_streaming(text)
         if state.stop_requested:
@@ -135,7 +145,7 @@ class TelnyxSpeaker:
             if not sent_any and not state.stop_requested:
                 pcm, rate = await self.synthesize(text)
                 if not state.stop_requested:
-                    await self.send_frames(audio.pcm_to_ulaw_frames(pcm, rate))
+                    await self.send_frames(audio.pcm_to_telephony_frames(pcm, rate))
         finally:
             log.info(
                 "stream fini: %d frames (%.1fs audio) en %.1fs%s",

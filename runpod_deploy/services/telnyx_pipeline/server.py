@@ -27,7 +27,6 @@ import time
 os.environ.setdefault("TZ", os.environ.get("HIKKY_TIMEZONE", "Europe/Paris"))  # voir config.py
 time.tzset()
 
-import httpx  # noqa: E402
 from fastapi import FastAPI, Request, WebSocket  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 
@@ -37,6 +36,7 @@ from .config import Settings, load_env_file  # noqa: E402
 from .inbound import EMPTY_TEXML, StreamRegistry, parse_form, texml_connect  # noqa: E402
 from .repair import repair_reply  # noqa: E402
 from .speaker import TelnyxSpeaker  # noqa: E402
+from .startup import make_lifespan  # noqa: E402
 from .turn_detector import BargeIn, TurnDetector, Utterance  # noqa: E402
 
 # ── configuration : tout vient de l'environnement (voir config.py) ─────────────
@@ -54,66 +54,9 @@ STT_TRAILING_SILENCE_S = 1.0
 
 STATE: dict = {}
 STREAMS = StreamRegistry()
-app = FastAPI()
 
 
-# ── démarrage : modèles et services voisins ───────────────────────────────────
-@app.on_event("startup")
-async def _build() -> None:
-    from poc_common import build_session_factory
-
-    from hikky.adapters.back.backend_restaurant_context import BackendRestaurantContextAdapter
-    from hikky.adapters.back.call_ingest_adapter import CallIngestAdapter
-    from hikky.adapters.back.http_client import BackHttpClient
-    from hikky.adapters.back.knowledge_adapter import BackendKnowledgeAdapter
-    from hikky.adapters.voice.llama_cpp_llm import LlamaCppLLMAdapter
-    from hikky.domain.conversation_brain import QuestionAnswerer
-    from hikky.domain.phraseur import Phraseur
-    from hikky.pipeline.llm_slot_extractor import LLMSlotExtractor
-
-    t = time.time()
-    log.info("chargement LLM Qwen 32B...")
-    llm = LlamaCppLLMAdapter(model_path=settings.llm_gguf, n_ctx=4096, n_gpu_layers=-1)
-    log.info("LLM chargé en %.1fs", time.time() - t)
-    client = BackHttpClient(base_url=settings.back_base_url, api_key=settings.back_api_key)
-    STATE["context_port"] = BackendRestaurantContextAdapter(client)
-    STATE["session_factory"] = build_session_factory(
-        llm, reservation_port=CallIngestAdapter(client, restaurant_phone=settings.restaurant_phone)
-    )
-    # Base de connaissances du restaurant : le port ne lève jamais, backend injoignable
-    # = base vide, l'appel continue.
-    knowledge = BackendKnowledgeAdapter(client, restaurant_phone=settings.restaurant_phone)
-    STATE["answerer"] = QuestionAnswerer(llm, knowledge=knowledge)
-    STATE["phraseur"] = Phraseur(llm)
-    STATE["extractor"] = LLMSlotExtractor(llm)
-    STATE["http"] = httpx.AsyncClient(timeout=60.0)
-    log.info(
-        "heure locale du bot : %s (%s)", time.strftime("%A %d %B %Y %H:%M"), os.environ.get("TZ")
-    )
-
-    # Salutation : texte fixe, synthétisée une fois, trames prêtes.
-    try:
-        probe = TelnyxSpeaker(
-            ws=None,
-            http=STATE["http"],
-            state=CallState(),
-            tts_url=settings.tts_url,
-            tts_stream_url=settings.tts_stream_url,
-            streaming=False,
-        )
-        pcm, rate = await probe.synthesize(settings.greeting)
-        STATE["greeting_frames"] = audio.pcm_to_ulaw_frames(pcm, rate)
-        log.info("salutation cachée: %d frames", len(STATE["greeting_frames"]))
-    except Exception as e:  # noqa: BLE001
-        STATE["greeting_frames"] = None
-        log.warning("cache salutation échoué: %s", e)
-    try:
-        t = time.time()
-        await llm.complete([{"role": "user", "content": "Bonjour"}])
-        log.info("LLM préchauffé en %.1fs", time.time() - t)
-    except Exception as e:  # noqa: BLE001
-        log.warning("préchauffage LLM échoué: %s", e)
-    log.info("orchestrateur prêt")
+app = FastAPI(lifespan=make_lifespan(settings, STATE))
 
 
 # ── ça sonne ──────────────────────────────────────────────────────────────────
@@ -213,17 +156,17 @@ async def handle_call(ws: WebSocket) -> None:
 
         elif event == "media" and state.session is not None:
             pcm = audio.decode_telephony(base64.b64decode(msg["media"]["payload"]), alaw=state.alaw)
-            for ev in detector.feed(pcm, bot_speaking=state.speaking):
-                if isinstance(ev, BargeIn):
-                    log.info("barge-in : le client parle (rms=%d), bot coupé", ev.rms)
+            for event in detector.feed(pcm, bot_speaking=state.speaking):
+                if isinstance(event, BargeIn):
+                    log.info("barge-in : le client parle (rms=%d), bot coupé", event.rms)
                     await speaker.interrupt()
-                elif isinstance(ev, Utterance) and ev.during_bot_speech:
+                elif isinstance(event, Utterance) and event.during_bot_speech:
                     log.info(
-                        "énoncé pendant la parole du bot : %d frames -> gardé", ev.speech_frames
+                        "énoncé pendant la parole du bot : %d frames -> gardé", event.speech_frames
                     )
-                    state.keep_pending(ev.pcm)
-                elif isinstance(ev, Utterance):
-                    asyncio.create_task(on_utterance(ev.pcm))
+                    state.keep_pending(event.pcm)
+                elif isinstance(event, Utterance):
+                    asyncio.create_task(on_utterance(event.pcm))
 
         elif event == "stop":
             log.info("appel terminé stream=%s", state.stream_id)

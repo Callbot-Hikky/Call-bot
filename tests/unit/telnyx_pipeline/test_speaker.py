@@ -92,8 +92,8 @@ async def test_une_phrase_en_flux_part_vers_telnyx_en_messages_media():
     medias = [m for m in ws.sent if m["event"] == "media"]
     assert len(medias) == 2
     payload = base64.b64decode(medias[0]["media"]["payload"])
-    assert len(payload) % audio.ULAW_FRAME_BYTES == 0
-    assert len(payload) >= 40 * audio.ULAW_FRAME_BYTES  # ~1 s d'audio = 50 trames
+    assert len(payload) % audio.G711_FRAME_BYTES == 0
+    assert len(payload) >= 40 * audio.G711_FRAME_BYTES  # ~1 s d'audio = 50 trames
     assert state.speaking is False
 
 

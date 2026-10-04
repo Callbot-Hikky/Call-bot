@@ -50,4 +50,4 @@ def test_un_inbound_sans_identifiant_est_toujours_accepte():
 def test_la_consigne_texml_pointe_sur_notre_websocket():
     xml = texml_connect("pod-19123.proxy.runpod.net")
     assert "wss://pod-19123.proxy.runpod.net/telnyx/stream" in xml
-    assert 'bidirectionalCodec="PCMU"' in xml
+    assert 'bidirectionalCodec="PCMA"' in xml  # A-law : le même codec que la ligne envoie

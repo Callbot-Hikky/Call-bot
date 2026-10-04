@@ -18,13 +18,14 @@ from .audio import rms
 
 # ── Constantes, toutes issues d'appels réels ──────────────────────────────────
 SPEECH_THRESHOLD = 800  # niveau au-dessus duquel « ça parle » (bruit de ligne + marge)
-END_SILENCE_FRAMES = 35  # 700 ms de silence = fin de phrase. 500 ms coupait 2 phrases
-# sur 10 en plein mot (« si le restaurant est à l'al… »).
-MIN_SPEECH_FRAMES = 12  # 240 ms de parole minimum : filtre les blips, garde « oui »
+# 35 paquets de silence = 700 ms de silence = fin de phrase.
+# 500 ms coupait 2 phrases sur 10 en plein mot (« si le restaurant est à l'al… »).
+END_SILENCE_FRAMES = 35
+MIN_SPEECH_FRAMES = 12  # 12 paquets de parole minimum = 240 ms, sinon c'est un bruit
 BARGEIN_THRESHOLD = 2500  # parole soutenue, nettement au-dessus du bruit, pour couper le bot
 BARGEIN_MIN_FRAMES = 12  # … pendant 240 ms d'affilée (un « mmh » ne coupe pas)
-PREROLL_BYTES = 6400  # 400 ms d'audio RÉEL gardées avant l'attaque : le seuil
-# d'énergie rogne la première syllabe, sinon.
+# 400 ms d'audio RÉEL gardées avant l'attaque : le seuil d'énergie rogne la première syllabe, sinon.
+PREROLL_BYTES = 6400
 
 
 @dataclass(frozen=True)
