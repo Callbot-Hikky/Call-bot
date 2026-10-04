@@ -28,11 +28,13 @@ python3 -m venv --system-site-packages /workspace/venv-telnyx
 /workspace/venv-telnyx/bin/pip install -q qwen-tts fastapi uvicorn 2>&1 | tail -1
 /workspace/venv-telnyx/bin/python -c "import torch, qwen_tts; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
-step "venv-stt (Nemotron, transformers>=5.13, cuDNN9)"
+step "venv-stt (faster-whisper large-v3 ; Nemotron conservé en secours : transformers/accelerate)"
 python3 -m venv /workspace/venv-stt
 /workspace/venv-stt/bin/pip install -q torch --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -1
-/workspace/venv-stt/bin/pip install -q "transformers>=5.13" accelerate numpy soundfile librosa uvicorn fastapi "nvidia-cudnn-cu12>=9" soxr 2>&1 | tail -1
-/workspace/venv-stt/bin/python -c "import transformers, accelerate; print('transformers', transformers.__version__)"
+# faster-whisper = STT en production (stt_server.py). transformers/accelerate ne servent
+# qu'au serveur de secours stt_server_nemotron.py. httpx : scripts de mesure (labs/).
+/workspace/venv-stt/bin/pip install -q faster-whisper httpx "transformers>=5.13" accelerate numpy soundfile librosa uvicorn fastapi "nvidia-cudnn-cu12>=9" soxr 2>&1 | tail -1
+/workspace/venv-stt/bin/python -c "import faster_whisper, transformers; print('faster-whisper', faster_whisper.__version__, '| transformers', transformers.__version__)"
 
 step "attente fin des téléchargements"
 wait

@@ -2,8 +2,10 @@
 - POST /telnyx/inbound : TeXML <Connect><Stream> (entree PCMA A-law reelle, sortie PCMU).
 - WS /telnyx/stream : protocole Media Streaming Telnyx.
 Reutilise le domaine Call-bot (run_routed_turn, reservation backend), LLM Qwen 32B in-process.
-Reconstruit 2026-09-16 sur nouveau pod. Voix ona, codec A-law entrant, salutation cachee,
-reponses courtes, re-prompt de confirmation."""
+Services voisins : STT faster-whisper large-v3 (:8801), TTS Qwen3-TTS voix ono_anna en flux
+(:8802). Codec A-law entrant lu dans l'evenement start, salutation mise en cache au boot,
+un seul Stream par CallSid, barge-in, reparation en trois paliers, fuseau du restaurant.
+Historique des decisions et mesures : runpod_deploy/RESUME.md."""
 import os, sys, json, base64, asyncio, audioop, time, logging
 # Le pod RunPod est en UTC : à 00h29 à Paris, « aujourd'hui » valait encore la veille
 # pour l'extracteur de dates (appel réel du 2026-10-04 : « aujourd'hui (dimanche) »
@@ -13,8 +15,10 @@ time.tzset()
 try:  # reechantillonnage 8k->16k de qualite (polyphase). audioop.ratecv = interpolation
     import numpy as _np  # grossiere (et audioop disparait en Python 3.13).
     import soxr as _soxr
-except Exception:  # noqa: BLE001 - repli silencieux, l'appel ne doit jamais casser
+except Exception:  # noqa: BLE001 - repli : l'appel ne doit jamais casser, mais on le DIT
     _soxr = None
+    print("[telnyx] AVERTISSEMENT : soxr absent, reechantillonnage grossier (audioop.ratecv) "
+          "-> qualite STT degradee. pip install soxr dans venv-bot.", flush=True)
 import httpx
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
@@ -34,7 +38,12 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("telnyx")
 conv = logging.getLogger("hikky.conversation")
 
-PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "uv9jklqxm6vwnj-19123.proxy.runpod.net")
+# Hote public du pod (proxy RunPod), different a chaque pod : OBLIGATOIRE dans l'env
+# (run_telnyx.sh). Plus de valeur par defaut : l'ancienne pointait sur un pod mort et
+# Telnyx se connectait dans le vide sans aucune erreur visible.
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "")
+if not PUBLIC_HOST:
+    raise SystemExit("PUBLIC_HOST manquant : exporter l'hote du proxy RunPod (ex. <podid>-19123.proxy.runpod.net)")
 STT_URL = "http://127.0.0.1:8801/transcribe"
 TTS_URL = "http://127.0.0.1:8802/synthesize"
 TTS_STREAM_URL = "http://127.0.0.1:8802/synthesize_stream"
@@ -354,8 +363,10 @@ async def stream(ws: WebSocket):
     async def _do_turn_locked(buf: bytes, rejoue: bool = False):
         nonlocal awaiting, n_incompris, dernier_texte
         buf16 = _to16k(buf)
-        # Silence en QUEUE seulement : vide le contexte droit (lookahead) de Nemotron.
-        # En tete c'est inutile - l'attaque est couverte par le pre-roll d'audio reel.
+        # Silence en QUEUE seulement : donne au STT une fin de phrase nette (regle heritee
+        # de Nemotron, conservee avec Whisper : sans effet negatif, et la derniere syllabe
+        # n'est jamais coupee). En tete c'est inutile - l'attaque est couverte par le
+        # pre-roll d'audio reel.
         buf16 = buf16 + b"\x00" * (16000 * 2)   # 1.0s @ 16kHz
         text = await transcribe(buf16)
         if not text:
